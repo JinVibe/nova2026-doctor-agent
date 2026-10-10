@@ -1,0 +1,23 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Secrets
+.env
+.env.*
+
+# 대회 자료 (슬라이드 캡처, 비공개 증례 등)
+*.png
+*.jpg
+data/private/
+
+# 제출용 빌드 산출물
+*.zip
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
