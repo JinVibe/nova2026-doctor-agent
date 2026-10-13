@@ -17,6 +17,20 @@ CORE_HISTORY = [
     ('job', '하시는 일은 무엇인가요?', ('하시는 일', '직업', '일하')),
 ]
 
+# 소아(보호자 동반): 흡연·음주·직업 대신 출생·발달·가족 성장력·생활
+PEDS_HISTORY = CORE_HISTORY[:5] + [
+    ('birth', '몇 주에 몇 kg으로 태어났나요?', ('태어', '출생')),
+    ('develop', '걷기·말하기는 또래만큼 빨랐나요?', ('발달', '걷기', '말하기')),
+    ('vaccine', '예방접종은 제때 다 맞았나요?', ('예방접종',)),
+    ('parents', '부모님도 어릴 때 비슷하셨나요?', ('부모님도', '어릴 때')),
+    ('school', '유치원이나 학교 생활은 어떤가요?', ('유치원', '학교', '어린이집')),
+]
+CHILD_WORDS = ('보호자', '아이', '아기', '살 남자아이', '살 여자아이', '어린이', '학년')
+
+
+def is_child(opening):
+    return any(w in opening for w in CHILD_WORDS)
+
 # ID: (분류, 보낼 문장)
 EXAMS = {
     # 전신
@@ -24,7 +38,6 @@ EXAMS = {
     'MENTAL': ('전신', '의식·지남력 평가하겠습니다'),
     'VITALS': ('전신', '활력징후 측정하겠습니다'),
     'ORTHO_BP': ('전신', '기립성 혈압 측정하겠습니다'),
-    'ANTHRO': ('전신', '신체 계측하겠습니다'),
     'GROWTH_CHART': ('소아', '성장도표 백분위수 확인하겠습니다'),
     'GROWTH_VEL': ('소아', '성장 속도·중간부모키 산출하겠습니다'),
     'BODY_PROP': ('소아', '신체 비율 평가하겠습니다'),
@@ -97,7 +110,7 @@ EXAMS = {
 }
 
 # 거의 모든 증례 진찰표에 있는 기본 진찰(공개 샘플 3건 공통)
-CORE_EXAMS = ['GEN_APPEAR', 'MENTAL', 'HEART', 'LUNG', 'ABD_PALP']
+CORE_EXAMS = ['VITALS', 'GEN_APPEAR', 'MENTAL', 'HEART', 'LUNG', 'ABD_PALP']
 
 
 def exam_menu():

@@ -1,4 +1,4 @@
-"""진료 흐름: PLAN → EXECUTE → REPLAN → CLOSING → RECORD.
+"""진료 흐름: PLAN → 문진 → REPLAN → 진찰 → REPLAN → REASSESS → CLOSING → RECORD.
 
 LLM은 계획·상태 갱신·글쓰기만 하고, 무엇을 보낼지(30자·중복·진찰 문구·턴·시간)는 코드가 통제한다.
 """
@@ -10,14 +10,16 @@ from pathlib import Path
 
 from nova_sdk import NovaError
 
-from .knowledge import CORE_EXAMS, CORE_HISTORY, EXAMS, exam_menu
+from .knowledge import CORE_EXAMS, CORE_HISTORY, EXAMS, PEDS_HISTORY, exam_menu, is_child
 from .llm import STOP_CODES, Doctor, with_retry
-from .prompts import CLOSING_PROMPT, PLAN_PROMPT, QUESTION_RULES, REPLAN_PROMPT
+from .prompts import (ANSWER_PROMPT, CLOSING_PROMPT, DX_RULES, MED_RULES, PLAN_PROMPT, QUESTION_RULES, REASSESS_PROMPT,
+                      REPLAN_PROMPT)
 from .record import write_record
 from .visit import MAX_CHARS, Visit, nfc
 
-TURN_BUDGET = int(os.getenv('NOVA_TURN_BUDGET', 40))  # 마무리 설명 포함 상한
-CLOSING_TURNS = 6
+TURN_BUDGET = int(os.getenv('NOVA_TURN_BUDGET', 48))  # 마무리 설명 포함 상한
+CLOSING_TURNS = 8
+ANSWER_TURNS = 2    # 마무리 설명 뒤 환자 질문에 답하는 턴
 MAX_REPLANS = 3
 TIME_MARGIN = 240   # 마감 4분 전부터 마무리·기록으로
 EMPATHY = '많이 불편하셨겠어요. '
@@ -38,8 +40,9 @@ class Consult:
         self.client = client
         self.visit = Visit(client.session())
         self.doctor = Doctor(client)
-        self.queue = []      # [('SAY', 문장) | ('EXAM', ID)]
+        self.queue = []      # [('SAY', 문장) | ('EXAM', ID) | ('CORE', 항목) | ('REPLAN', None)]
         self.started = time.time()
+        self.log_dir = os.getenv('NOVA_OUTPUT_DIR')  # 로컬 로그 위치(서버에선 미설정)
 
     # ---------- 행동 ----------
     def has_time(self):
@@ -85,35 +88,38 @@ class Consult:
         return self.act('EXAM', EXAMS[eid][1])
 
     # ---------- 계획 ----------
-    def enqueue(self, plan):
+    def enqueue(self, plan, front=False):
         questions = [q for q in plan.get('questions') or [] if isinstance(q, str)]
         exams = [e for e in plan.get('exams') or [] if e in EXAMS]
-        self.queue += [('SAY', q) for q in questions] + [('EXAM', e) for e in exams]
+        items = [('SAY', q) for q in questions] + [('EXAM', e) for e in exams]
+        self.queue = items + self.queue if front else self.queue + items
+        return len(items)
 
     def plan(self):
-        plan = self.doctor.ask_json(PLAN_PROMPT.format(rules=QUESTION_RULES, menu=exam_menu()),
+        plan = self.doctor.ask_json(PLAN_PROMPT.format(dx=DX_RULES, rules=QUESTION_RULES, menu=exam_menu()),
                                     self.visit.situation(), max_tokens=6000,
                                     check=lambda v: isinstance(v.get('questions'), list)) or {}
         self.visit.ddx = plan.get('ddx') or []
         self.enqueue({'questions': plan.get('questions')})
-        self.queue += [('CORE', item) for item in CORE_HISTORY]
+        history = PEDS_HISTORY if is_child(self.visit.opening) else CORE_HISTORY
+        self.queue += [('CORE', item) for item in history]
+        self.queue.append(('REPLAN', None))  # 병력 답(약 용량 등)을 보고 진찰 전에 한 번 보완
         self.enqueue({'exams': CORE_EXAMS + list(plan.get('exams') or [])})
 
-    def replan(self):
+    def replan(self, front=False):
         done = ', '.join(sorted(self.visit.exams_done)) or '(없음)'
-        update = self.doctor.ask_json(REPLAN_PROMPT.format(rules=QUESTION_RULES, done=done, menu=exam_menu()),
+        prompt = REPLAN_PROMPT.format(med=MED_RULES, dx=DX_RULES, rules=QUESTION_RULES, done=done, menu=exam_menu())
+        update = self.doctor.ask_json(prompt,
                                       self.visit.situation() + f'\n\n현재 감별진단: {self.visit.ddx_text()}',
                                       max_tokens=6000, check=lambda v: 'ddx' in v or 'questions' in v)
         if not update:
             return False
         self.visit.ddx = update.get('ddx') or self.visit.ddx
-        before = len(self.queue)
-        self.enqueue(update)
-        return len(self.queue) > before  # 추가할 것이 없으면(enough 포함) 마무리로
+        return self.enqueue(update, front) > 0  # 추가할 것이 없으면(enough 포함) 마무리로
 
     # ---------- 단계 ----------
     def gather(self):
-        limit = min(TURN_BUDGET, self.visit.total_turns) - CLOSING_TURNS
+        limit = min(TURN_BUDGET, self.visit.total_turns) - CLOSING_TURNS - ANSWER_TURNS
         replans = 0
         while self.visit.turn < limit and self.has_time():
             if not self.queue:
@@ -122,6 +128,11 @@ class Consult:
                 replans += 1
                 continue
             kind, item = self.queue.pop(0)
+            if kind == 'REPLAN':
+                if replans < MAX_REPLANS:
+                    replans += 1
+                    self.replan(front=True)
+                continue
             if kind == 'CORE':
                 topic, question, keywords = item
                 ok = True if covered(self.visit, keywords) else self.say(question)
@@ -132,15 +143,39 @@ class Consult:
             if not ok:
                 return
 
-    def closing(self):
+    def reassess(self):
+        """진료 전체를 다시 읽고 최종 감별진단·주진단을 정한다(후반에 나온 단서 반영)."""
         top = next((d.get('dx') for d in self.visit.ddx if isinstance(d, dict) and d.get('dx')), '')
-        result = self.doctor.ask_json(CLOSING_PROMPT, self.visit.situation() + f'\n\n현재 감별진단: {self.visit.ddx_text()}',
+        result = self.doctor.ask_json(REASSESS_PROMPT.format(dx=DX_RULES),
+                                      self.visit.situation() + f'\n\n진료 중 감별진단: {self.visit.ddx_text()}',
+                                      max_tokens=6000, check=lambda v: v.get('diagnosis')) or {}
+        if isinstance(result.get('ddx'), list) and result['ddx']:
+            self.visit.ddx = result['ddx']
+        return nfc(result.get('diagnosis')) or top
+
+    def closing(self, diagnosis):
+        result = self.doctor.ask_json(CLOSING_PROMPT, self.visit.situation()
+                                      + f'\n\n감별진단: {self.visit.ddx_text()}\n주진단: {diagnosis}',
                                       max_tokens=4000, check=lambda v: isinstance(v.get('lines'), list)) or {}
-        diagnosis = nfc(result.get('diagnosis')) or top
         lines = [nfc(l) for l in result.get('lines') or [] if valid_question(l)]
         if not lines and diagnosis:
             lines = [l for l in (f'{diagnosis} 가능성이 높아 보여요.', '정확히 보려고 몇 가지 검사를 할게요.',
                                  '증상이 심해지면 바로 병원에 오세요.', '1~2주 뒤에 다시 뵐게요.') if len(l) <= MAX_CHARS]
+        said = self.speak(lines)
+        for _ in range(ANSWER_TURNS):  # 환자가 되물으면 짧게 답한다
+            last = self.visit.events[-1] if self.visit.events else {}
+            if last.get('kind') != 'SAY' or '?' not in (last.get('reply') or ''):
+                break
+            answer = self.doctor.ask_json(ANSWER_PROMPT, self.visit.situation() + f'\n\n주진단: {diagnosis}',
+                                          max_tokens=3000, check=lambda v: v.get('line')) or {}
+            line = nfc(answer.get('line'))
+            if not valid_question(line) or not self.speak([line]):
+                break
+            said.append(line)
+        return said
+
+    def speak(self, lines):
+        """설명 문장들을 차례로 말하고 실제로 전달된 문장을 돌려준다."""
         said = []
         for line in lines:
             if self.visit.turns_left <= 0 or self.visit.seconds_left() < 90:
@@ -150,12 +185,13 @@ class Consult:
                 break
             if len(self.visit.events) > before and self.visit.events[-1]['kind'] == 'SAY':
                 said.append(line)
-        return said, diagnosis
+        return said
 
     def run(self):
         self.plan()
         self.gather()
-        said, diagnosis = self.closing()
+        diagnosis = self.reassess()
+        said = self.closing(diagnosis)
         note, final = write_record(self.doctor, self.visit, said, diagnosis)
         self.save_log(note, final)
         return self.client.diagnose(note=note, diagnosis=final)
@@ -164,7 +200,7 @@ class Consult:
         summary = {'turns': self.visit.turn, 'doctor_calls': self.doctor.calls, 'doctor_failures': self.doctor.failures,
                    'seconds': round(time.time() - self.started), 'ddx': self.visit.ddx, 'diagnosis': diagnosis}
         print('[agent] ' + json.dumps(summary, ensure_ascii=False), file=sys.stderr)
-        out = os.getenv('NOVA_OUTPUT_DIR')
+        out = self.log_dir
         if out:
             try:
                 Path(out).mkdir(parents=True, exist_ok=True)
