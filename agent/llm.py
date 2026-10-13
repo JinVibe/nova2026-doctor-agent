@@ -2,26 +2,41 @@
 
 temperature는 보내지 않는다(예선 Doctor가 gpt-6-luna로 바뀌어 미지원).
 """
+import inspect
 import json
 import re
 import time
+import uuid
 
 from nova_sdk import NovaError
 
 # 모델·네트워크 일시 오류 — 턴을 쓰지 않으므로 잠시 뒤 다시 보낸다.
 RETRY_CODES = {'PROVIDER_UNAVAILABLE', 'PROVIDER_RESPONSE_INVALID', 'PATIENT_RESPONSE_INVALID',
-               'EXAMINER_RESPONSE_INVALID', 'API_UNAVAILABLE', 'REQUEST_PENDING', 'LOCAL_GATEWAY_UNAVAILABLE'}
+               'EXAMINER_RESPONSE_INVALID', 'API_UNAVAILABLE', 'REQUEST_PENDING', 'LOCAL_GATEWAY_UNAVAILABLE',
+               'INVALID_API_RESPONSE'}  # 게이트웨이가 JSON 아닌 응답(HTML 오류 페이지 등)을 준 경우
 # 진료를 더 할 수 없는 상태.
 STOP_CODES = {'TURN_LIMIT_REACHED', 'SESSION_EXPIRED', 'SESSION_CLOSED', 'RUN_NOT_ACTIVE'}
 
 
-def with_retry(call, *args, waits=(2, 5, 10), **kwargs):
+# 같은 request_id로 다시 보내야 하는 오류(문서: 처리 중이거나 제공자 장애 → 끝난 답을 그대로 받음).
+SAME_REQUEST_CODES = {'PROVIDER_UNAVAILABLE', 'REQUEST_PENDING', 'API_UNAVAILABLE', 'LOCAL_GATEWAY_UNAVAILABLE',
+                      'INVALID_API_RESPONSE'}
+
+
+def with_retry(call, *args, waits=(2, 5, 10, 20, 30), **kwargs):
+    """일시 오류면 기다렸다 다시 부른다. request_id를 받는 호출(say·exam·chat)은 같은 ID로 재시도한다."""
+    takes_id = 'request_id' in inspect.signature(call).parameters
+    request_id = str(uuid.uuid4())
     for wait in (*waits, None):
         try:
+            if takes_id:
+                kwargs['request_id'] = request_id
             return call(*args, **kwargs)
         except NovaError as exc:
             if exc.code not in RETRY_CODES or wait is None:
                 raise
+            if exc.code not in SAME_REQUEST_CODES:  # 빈 답 등은 새 요청으로
+                request_id = str(uuid.uuid4())
             time.sleep(wait)
 
 

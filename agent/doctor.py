@@ -1,4 +1,4 @@
-"""진료 흐름: PLAN → 문진 → REPLAN → 진찰 → REPLAN → REASSESS → CLOSING → RECORD.
+"""진료 흐름: PLAN → 문진 → REPLAN → 진찰 → REPLAN → CHALLENGE → REASSESS → CLOSING → RECORD.
 
 LLM은 계획·상태 갱신·글쓰기만 하고, 무엇을 보낼지(30자·중복·진찰 문구·턴·시간)는 코드가 통제한다.
 """
@@ -12,7 +12,7 @@ from nova_sdk import NovaError
 
 from .knowledge import CORE_EXAMS, CORE_HISTORY, EXAMS, PEDS_HISTORY, exam_menu, is_child
 from .llm import STOP_CODES, Doctor, with_retry
-from .prompts import (ANSWER_PROMPT, CLOSING_PROMPT, DX_RULES, MED_RULES, PLAN_PROMPT, QUESTION_RULES, REASSESS_PROMPT,
+from .prompts import (ANSWER_PROMPT, CHALLENGER_PROMPT, CLOSING_PROMPT, DX_RULES, MED_RULES, PLAN_PROMPT, QUESTION_RULES, REASSESS_PROMPT,
                       REPLAN_PROMPT)
 from .record import write_record
 from .visit import MAX_CHARS, Visit, nfc
@@ -38,10 +38,11 @@ def covered(visit, keywords):
 class Consult:
     def __init__(self, client):
         self.client = client
-        self.visit = Visit(client.session())
+        self.visit = Visit(with_retry(client.session))
         self.doctor = Doctor(client)
         self.queue = []      # [('SAY', 문장) | ('EXAM', ID) | ('CORE', 항목) | ('REPLAN', None)]
         self.started = time.time()
+        self.review = {}
         self.log_dir = os.getenv('NOVA_OUTPUT_DIR')  # 로컬 로그 위치(서버에선 미설정)
 
     # ---------- 행동 ----------
@@ -68,7 +69,7 @@ class Consult:
 
     def resync(self):
         try:
-            self.visit.turns_left = self.client.session()['turns_remaining']
+            self.visit.turns_left = with_retry(self.client.session)['turns_remaining']
         except (NovaError, KeyError):
             pass
 
@@ -118,18 +119,18 @@ class Consult:
         return self.enqueue(update, front) > 0  # 추가할 것이 없으면(enough 포함) 마무리로
 
     # ---------- 단계 ----------
-    def gather(self):
+    def gather(self, allow_replan=True):
         limit = min(TURN_BUDGET, self.visit.total_turns) - CLOSING_TURNS - ANSWER_TURNS
         replans = 0
         while self.visit.turn < limit and self.has_time():
             if not self.queue:
-                if replans >= MAX_REPLANS or not self.replan():
+                if not allow_replan or replans >= MAX_REPLANS or not self.replan():
                     return
                 replans += 1
                 continue
             kind, item = self.queue.pop(0)
             if kind == 'REPLAN':
-                if replans < MAX_REPLANS:
+                if allow_replan and replans < MAX_REPLANS:
                     replans += 1
                     self.replan(front=True)
                 continue
@@ -143,11 +144,23 @@ class Consult:
             if not ok:
                 return
 
-    def reassess(self):
-        """진료 전체를 다시 읽고 최종 감별진단·주진단을 정한다(후반에 나온 단서 반영)."""
+    def challenge(self):
+        """반대 의견(악마의 변호인): 1위 진단의 모순·미배제 위험 진단을 점검하고, 판가름 질문이 있으면 남은 턴에 묻는다."""
+        review = self.doctor.ask_json(CHALLENGER_PROMPT.format(dx=DX_RULES, menu=exam_menu()),
+                                      self.visit.situation() + f'\n\n현재 감별진단: {self.visit.ddx_text()}',
+                                      max_tokens=6000, check=lambda v: 'alternative' in v or 'questions' in v) or {}
+        self.queue = []
+        self.enqueue({'questions': (review.get('questions') or [])[:3], 'exams': (review.get('exams') or [])[:2]})
+        self.gather(allow_replan=False)
+        return review
+
+    def reassess(self, review):
+        """진료 전체를 다시 읽고 최종 감별진단·주진단을 정한다(후반에 나온 단서·반대 의견 반영)."""
         top = next((d.get('dx') for d in self.visit.ddx if isinstance(d, dict) and d.get('dx')), '')
+        opinion = json.dumps({k: v for k, v in review.items() if k not in ('questions', 'exams')}, ensure_ascii=False)
         result = self.doctor.ask_json(REASSESS_PROMPT.format(dx=DX_RULES),
-                                      self.visit.situation() + f'\n\n진료 중 감별진단: {self.visit.ddx_text()}',
+                                      self.visit.situation() + f'\n\n진료 중 감별진단: {self.visit.ddx_text()}'
+                                      f'\n\n검토 의견(반대 의견): {opinion}',
                                       max_tokens=6000, check=lambda v: v.get('diagnosis')) or {}
         if isinstance(result.get('ddx'), list) and result['ddx']:
             self.visit.ddx = result['ddx']
@@ -190,7 +203,8 @@ class Consult:
     def run(self):
         self.plan()
         self.gather()
-        diagnosis = self.reassess()
+        self.review = self.challenge()
+        diagnosis = self.reassess(self.review)
         said = self.closing(diagnosis)
         note, final = write_record(self.doctor, self.visit, said, diagnosis)
         self.save_log(note, final)
@@ -205,7 +219,7 @@ class Consult:
             try:
                 Path(out).mkdir(parents=True, exist_ok=True)
                 (Path(out) / 'agent_log.json').write_text(json.dumps(
-                    {**summary, 'events': self.visit.events, 'note': note}, ensure_ascii=False, indent=1), encoding='utf-8')
+                    {**summary, 'review': self.review, 'events': self.visit.events, 'note': note}, ensure_ascii=False, indent=1), encoding='utf-8')
             except OSError:
                 pass
 
