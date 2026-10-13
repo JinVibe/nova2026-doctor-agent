@@ -21,6 +21,7 @@ nova-benchmarks-2026/
 *.jpg
 *.pptx
 *.zip
+!submissions/*.zip
 data/private/
 
 # 실행 결과
