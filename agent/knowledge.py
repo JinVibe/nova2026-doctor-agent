@@ -5,31 +5,85 @@
 LLM은 ID만 고르고 실제 문장은 여기서 보낸다.
 """
 
-# (주제, 질문, 이미 다룬 것으로 볼 키워드) — 30자 이하, 질문 하나
+# (주제, 질문, 이미 다룬 것으로 볼 키워드) — 30자 이하, 질문 하나.
+# 주의: '이나·거나·와/과·,·' 같은 복합 표시가 들어가면 doctor.say()의 복합 질문 차단에 걸려 보내지지 않는다(v1.1~v1.5에서
+# 수술·알레르기·발달 질문이 그 이유로 빠졌음). 여기 질문은 차단 없이 보내지만 문구도 단일 항목으로 둔다.
 CORE_HISTORY = [
     ('pmh', '지금 앓고 계신 병이 있으세요?', ('앓고', '지병', '질환', '병력', '진단받')),
     ('meds', '평소 드시는 약이 있으세요?', ('드시는 약', '복용', '먹는 약', '드시는 것')),
-    ('surgery', '수술이나 입원하신 적 있으세요?', ('수술', '입원')),
-    ('allergy', '약이나 음식 알레르기 있으세요?', ('알레르기',)),
+    ('otc', '약국 약이나 건강보조제도 드세요?', ('약국', '보조제', '영양제', '수면유도제', '건강기능')),
+    ('surgery', '수술받으신 적 있으세요?', ('수술',)),
+    ('admission', '입원하신 적 있으세요?', ('입원',)),
+    ('allergy', '알레르기가 있으세요?', ('알레르기',)),
+    ('psych', '정신과 진료를 받은 적 있으세요?', ('정신과', '정신건강', '상담을 받')),
     ('fh', '가족 중에 앓는 병이 있으세요?', ('가족',)),
     ('smoking', '담배는 피우세요?', ('담배', '흡연')),
     ('alcohol', '술은 얼마나 자주 드세요?', ('술은', '술을', '술 ', '음주')),
+    ('caffeine', '커피 같은 카페인 음료는 얼마나 드세요?', ('카페인', '커피')),
+    ('stress', '최근 스트레스 받는 일이 있으세요?', ('스트레스', '걱정거리', '힘든 일')),
+    ('sleep', '잠은 잘 주무세요?', ('잠', '수면', '주무')),
     ('job', '하시는 일은 무엇인가요?', ('하시는 일', '직업', '일하')),
+]
+# 가임기 여성(첫 진술에 '여' + 나이 15~50)에게만
+FEMALE_HISTORY = [
+    ('menses', '생리는 규칙적인가요?', ('생리', '월경')),
+    ('pregnancy', '임신 가능성이 있으세요?', ('임신',)),
 ]
 
 # 소아(보호자 동반): 흡연·음주·직업 대신 출생·발달·가족 성장력·생활
-PEDS_HISTORY = CORE_HISTORY[:5] + [
+PEDS_HISTORY = [c for c in CORE_HISTORY if c[0] in ('pmh', 'meds', 'surgery', 'admission', 'allergy', 'fh')] + [
     ('birth', '몇 주에 몇 kg으로 태어났나요?', ('태어', '출생')),
-    ('develop', '걷기·말하기는 또래만큼 빨랐나요?', ('발달', '걷기', '말하기')),
+    ('birth_len', '태어날 때 키는 몇 cm였나요?', ('태어날 때 키', '출생 신장', '출생 키')),
+    ('neonatal', '신생아 때 황달 같은 문제가 있었나요?', ('신생아', '황달', '주산기')),
+    ('develop', '발달은 또래와 비슷했나요?', ('발달', '걷기', '말하기')),
     ('vaccine', '예방접종은 제때 다 맞았나요?', ('예방접종',)),
+    ('steroid', '스테로이드나 한약을 먹인 적 있나요?', ('스테로이드', '한약', '보조제')),
     ('parents', '부모님도 어릴 때 비슷하셨나요?', ('부모님도', '어릴 때')),
+    ('sleep', '잠은 잘 자나요?', ('잠', '수면')),
+    ('home', '집에서 스트레스 받을 일이 있나요?', ('스트레스', '가정', '집안')),
     ('school', '유치원이나 학교 생활은 어떤가요?', ('유치원', '학교', '어린이집')),
 ]
-CHILD_WORDS = ('보호자', '아이', '아기', '살 남자아이', '살 여자아이', '어린이', '학년')
+CHILD_WORDS = ('보호자', '아이', '아기', '살 남자아이', '살 여자아이', '어린이', '학년', '남아', '여아', '엄마', '아빠')
 
 
 def is_child(opening):
     return any(w in opening for w in CHILD_WORDS)
+
+
+_TENS = {'열': 10, '스물': 20, '스무': 20, '서른': 30, '마흔': 40, '쉰': 50, '예순': 60, '일흔': 70, '여든': 80, '아흔': 90}
+_ONES = {'한': 1, '두': 2, '세': 3, '네': 4, '다섯': 5, '여섯': 6, '일곱': 7, '여덟': 8, '아홉': 9}
+
+
+def parse_age(opening):
+    """첫 진술의 나이. 숫자('32세', '32살')와 한국어 수사('서른두 살', '예순두 살', '여섯 살') 모두 처리. 없으면 None."""
+    import re
+    m = re.search(r'(\d{1,3})\s*(세|살)', opening)
+    if m:
+        return int(m.group(1))
+    tens = '|'.join(_TENS)
+    ones = '|'.join(_ONES)
+    m = re.search(rf'({tens})?\s*({ones})?\s*살', opening)
+    if m and (m.group(1) or m.group(2)):
+        return _TENS.get(m.group(1) or '', 0) + _ONES.get(m.group(2) or '', 0)
+    return None
+
+
+def is_reproductive_female(opening):
+    """성인 가임기 여성(15~50세)인지. 첫 진술은 '서른두 살 여자' 같은 한국어 수사로 온다."""
+    import re
+    age = parse_age(opening)
+    female = bool(re.search(r'여자|여성|(세|살)\s*,?\s*여(?=[\s,)/.]|$)|/\s*F\b', opening)) and not re.search(r'남자|남성', opening)
+    return female and age is not None and 15 <= age <= 50
+
+
+def history_items(opening):
+    """첫 진술에 맞는 공통 병력 문진 목록."""
+    if is_child(opening):
+        return list(PEDS_HISTORY)
+    items = list(CORE_HISTORY)
+    if is_reproductive_female(opening):
+        items[items.index(next(c for c in items if c[0] == 'smoking')):0] = FEMALE_HISTORY
+    return items
 
 # ID: (분류, 보낼 문장)
 EXAMS = {

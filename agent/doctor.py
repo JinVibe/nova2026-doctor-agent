@@ -13,7 +13,7 @@ from nova_sdk import NovaError
 
 from . import config
 from .guidelines import library
-from .knowledge import CORE_EXAMS, CORE_HISTORY, EXAMS, MED_FOLLOWUPS, MED_NEGATIVE, PEDS_HISTORY, exam_menu, is_child
+from .knowledge import CORE_EXAMS, EXAMS, MED_FOLLOWUPS, MED_NEGATIVE, exam_menu, history_items, is_child
 from .llm import STOP_CODES, Doctor, with_retry
 from .prompts import (ANSWER_PROMPT, ANSWER_PROMPT_V2, CHALLENGER_PROMPT, CLOSING_PROMPT, CLOSING_PROMPT_V2, DX_RULES, MED_RULES,
                       PLAN_DEDUP_RULE, PLAN_PROMPT, QUESTION_RULES, REASSESS_PROMPT, REPEAT_RULES, REPLAN_PROMPT)
@@ -120,8 +120,7 @@ class Consult:
                                     check=lambda v: isinstance(v.get('questions'), list)) or {}
         self.visit.ddx = plan.get('ddx') or []
         self.enqueue({'questions': plan.get('questions')})
-        history = PEDS_HISTORY if is_child(self.visit.opening) else CORE_HISTORY
-        self.queue += [('CORE', item) for item in history]
+        self.queue += [('CORE', item) for item in history_items(self.visit.opening)]
         self.queue.append(('REPLAN', None))  # 병력 답(약 용량 등)을 보고 진찰 전에 한 번 보완
         core = CORE_EXAMS + (['MENTAL', 'ABD_PALP'] if config.CORE_EXAMS_FULL else ['ABD_PALP'] if config.CORE_ABD else [])
         self.enqueue({'exams': core + list(plan.get('exams') or [])})
@@ -152,7 +151,12 @@ class Consult:
                     return
                 replans += 1
                 continue
-            kind, item = self.queue.pop(0)
+            # 진찰 턴 예약: 남은 턴이 대기 중인 진찰 수 이하이면 질문을 미루고 진찰부터 한다(v1.6에서 문진이 늘어 진찰이 1회만 된 적 있음)
+            pending_exams = [i for i, (k, e) in enumerate(self.queue) if k == 'EXAM' and e not in self.visit.exams_done]
+            if pending_exams and limit - self.visit.turn <= len(pending_exams) and self.queue[0][0] != 'EXAM':
+                kind, item = self.queue.pop(pending_exams[0])
+            else:
+                kind, item = self.queue.pop(0)
             if kind == 'REPLAN':
                 if allow_replan and replans < MAX_REPLANS:
                     replans += 1
@@ -160,7 +164,7 @@ class Consult:
                 continue
             if kind == 'CORE':
                 topic, question, keywords = item
-                ok = True if covered(self.visit, keywords) else self.say(question)
+                ok = True if covered(self.visit, keywords) else self.say(question, check_compound=False)  # 공통 문진은 검수된 문구
                 if topic == 'meds' and ok and self.took_medication():
                     # 약이 있다고 하면 이름·용량·횟수·기간을 하나씩 바로 묻는다(복합 질문은 환자가 거절함)
                     self.queue = [('SAY', q) for q, kws in MED_FOLLOWUPS if not covered(self.visit, kws)] + self.queue
@@ -278,7 +282,8 @@ class Consult:
             try:
                 Path(out).mkdir(parents=True, exist_ok=True)
                 (Path(out) / 'agent_log.json').write_text(json.dumps(
-                    {**summary, 'review': self.review, 'verify': self.visit.verify_log, 'references': self.references,
+                    {**summary, 'opening': self.visit.opening, 'vitals': self.visit.vitals,
+                     'review': self.review, 'verify': self.visit.verify_log, 'references': self.references,
                      'events': self.visit.events, 'note': note},
                     ensure_ascii=False, indent=1), encoding='utf-8')
             except OSError:
