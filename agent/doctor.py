@@ -15,8 +15,8 @@ from . import config
 from .guidelines import library
 from .knowledge import CORE_EXAMS, CORE_HISTORY, EXAMS, MED_FOLLOWUPS, MED_NEGATIVE, PEDS_HISTORY, exam_menu, is_child
 from .llm import STOP_CODES, Doctor, with_retry
-from .prompts import (ANSWER_PROMPT, CHALLENGER_PROMPT, CLOSING_PROMPT, DX_RULES, MED_RULES, PLAN_PROMPT, QUESTION_RULES, REASSESS_PROMPT,
-                      REPLAN_PROMPT)
+from .prompts import (ANSWER_PROMPT, ANSWER_PROMPT_V2, CHALLENGER_PROMPT, CLOSING_PROMPT, CLOSING_PROMPT_V2, DX_RULES, MED_RULES,
+                      PLAN_DEDUP_RULE, PLAN_PROMPT, QUESTION_RULES, REASSESS_PROMPT, REPEAT_RULES, REPLAN_PROMPT)
 from .record import write_record
 from .visit import MAX_CHARS, Visit, nfc
 
@@ -114,7 +114,8 @@ class Consult:
         return len(items)
 
     def plan(self):
-        plan = self.doctor.ask_json(PLAN_PROMPT.format(dx=DX_RULES, rules=QUESTION_RULES, menu=exam_menu()),
+        plan = self.doctor.ask_json(PLAN_PROMPT.format(dx=DX_RULES, rules=QUESTION_RULES, menu=exam_menu(),
+                                                       dedup=PLAN_DEDUP_RULE if config.REPEAT_GUARD else ''),
                                     self.visit.situation(), max_tokens=6000,
                                     check=lambda v: isinstance(v.get('questions'), list)) or {}
         self.visit.ddx = plan.get('ddx') or []
@@ -122,12 +123,14 @@ class Consult:
         history = PEDS_HISTORY if is_child(self.visit.opening) else CORE_HISTORY
         self.queue += [('CORE', item) for item in history]
         self.queue.append(('REPLAN', None))  # 병력 답(약 용량 등)을 보고 진찰 전에 한 번 보완
-        core = CORE_EXAMS + (['MENTAL', 'ABD_PALP'] if config.CORE_EXAMS_FULL else [])
+        core = CORE_EXAMS + (['MENTAL', 'ABD_PALP'] if config.CORE_EXAMS_FULL else ['ABD_PALP'] if config.CORE_ABD else [])
         self.enqueue({'exams': core + list(plan.get('exams') or [])})
 
     def replan(self, front=False):
         done = ', '.join(sorted(self.visit.exams_done)) or '(없음)'
-        prompt = REPLAN_PROMPT.format(med=MED_RULES, dx=DX_RULES, rules=QUESTION_RULES, done=done, menu=exam_menu())
+        guard = config.REPEAT_GUARD
+        prompt = REPLAN_PROMPT.format(med=MED_RULES, dx=DX_RULES, rules=QUESTION_RULES, done=done, menu=exam_menu(),
+                                      known='"known": ["이미 확인된 사실"], ' if guard else '', repeat=REPEAT_RULES if guard else '')
         user = self.visit.situation() + f'\n\n현재 감별진단: {self.visit.ddx_text()}'
         if self.rejected:
             user += ('\n\n보내지 않은 질문(한 번에 여러 항목을 물어서 제외됨 — 필요하면 항목 하나씩 따로 쓰세요): '
@@ -211,7 +214,7 @@ class Consult:
             return ''
 
     def closing(self, diagnosis):
-        result = self.doctor.ask_json(CLOSING_PROMPT, self.visit.situation()
+        result = self.doctor.ask_json(CLOSING_PROMPT_V2 if config.TALK_V2 else CLOSING_PROMPT, self.visit.situation()
                                       + f'\n\n감별진단: {self.visit.ddx_text()}\n주진단: {diagnosis}',
                                       max_tokens=4000, check=lambda v: isinstance(v.get('lines'), list)) or {}
         lines = [nfc(l) for l in result.get('lines') or [] if valid_question(l)]
@@ -223,13 +226,20 @@ class Consult:
             last = self.visit.events[-1] if self.visit.events else {}
             if last.get('kind') != 'SAY' or '?' not in (last.get('reply') or ''):
                 break
-            answer = self.doctor.ask_json(ANSWER_PROMPT, self.visit.situation() + f'\n\n주진단: {diagnosis}',
-                                          max_tokens=3000, check=lambda v: valid_question(v.get('line'))) or {}
-            line = nfc(answer.get('line')) or '검사 결과를 보고 자세히 설명드릴게요.'  # 답이 없거나 길면 기본 답
-            if not self.speak([line]):
-                break
-            said.append(line)
+            said += self.answer(diagnosis)
         return said
+
+    def answer(self, diagnosis):
+        """환자의 되물음에 1~2문장으로 답한다(v2). 답이 없거나 길면 기본 답."""
+        user = self.visit.situation() + f'\n\n주진단: {diagnosis}'
+        if config.TALK_V2:
+            result = self.doctor.ask_json(ANSWER_PROMPT_V2, user, max_tokens=3000,
+                                          check=lambda v: isinstance(v.get('lines'), list) and any(valid_question(l) for l in v['lines'])) or {}
+            lines = [nfc(l) for l in result.get('lines') or [] if valid_question(l)][:2]
+        else:
+            result = self.doctor.ask_json(ANSWER_PROMPT, user, max_tokens=3000, check=lambda v: valid_question(v.get('line'))) or {}
+            lines = [nfc(result.get('line'))] if result.get('line') else []
+        return self.speak(lines or ['검사 결과를 보고 자세히 설명드릴게요.'])
 
     def speak(self, lines):
         """설명 문장들을 차례로 말하고 실제로 전달된 문장을 돌려준다."""
