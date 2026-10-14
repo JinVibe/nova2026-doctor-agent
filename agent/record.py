@@ -9,9 +9,10 @@ import re
 from nova_sdk import RECORD_FIELDS, empty_record
 
 from . import config
-from .prompts import RECORD_PROMPT, VERIFY_PROMPT
+from .prompts import RECORD_PROMPT, VERIFY_AP_PROMPT, VERIFY_PROMPT
 
 VERIFY = config.VERIFY_S and os.getenv('NOVA_VERIFY_S', '1') != '0'  # S 항목 사실 검증(Doctor 호출 1회 추가)
+VERIFY_AP = config.VERIFY_AP and os.getenv('NOVA_VERIFY_AP', '1') != '0'  # A·P 검증(Doctor 호출 1회 추가)
 
 
 HEDGES = ('의심', '잠정', '가능성', '추정', '소견', '(r/o)', 'r/o')
@@ -50,6 +51,25 @@ def verify_subjective(doctor, visit, note):
     return {'status': 'applied', 'removed': result.get('removed') or [], 'added': result.get('added') or []}
 
 
+def verify_assessment_plan(doctor, visit, note, closing_lines):
+    """A·P 초안을 대화 원문·실제 마무리 설명과 대조: 근거 없는 사실 삭제, 하지 않은 안내는 '안내 예정'으로. 실패하면 초안 유지."""
+    user = (visit.situation() + '\n\n진료 마무리 설명(실제로 환자에게 한 말)\n' + ('\n'.join(closing_lines) or '(없음)')
+            + '\n\nA 초안\n' + json.dumps(note['A'], ensure_ascii=False, indent=1)
+            + '\n\nP 초안\n' + json.dumps(note['P'], ensure_ascii=False, indent=1))
+    result = doctor.ask_json(VERIFY_AP_PROMPT, user, max_tokens=8000,
+                             check=lambda v: isinstance(v.get('A'), dict) and isinstance(v.get('P'), dict))
+    if not result:
+        return {'status': 'failed'}
+    fixed = {s: {f: _text(result[s].get(f)) for f in RECORD_FIELDS[s]} for s in ('A', 'P')}
+    before = sum(len(v) for s in ('A', 'P') for v in note[s].values())
+    after = sum(len(v) for s in fixed for v in fixed[s].values())
+    if after < 0.6 * before:  # 과잉 삭제 의심
+        return {'status': 'rejected_overcut'}
+    for s in ('A', 'P'):
+        note[s].update(fixed[s])
+    return {'status': 'applied', 'fixed': result.get('fixed') or []}
+
+
 def write_record(doctor, visit, closing_lines, diagnosis, references=''):
     user = (visit.situation() + '\n\n진료 마무리 설명(실제로 환자에게 한 말)\n' + ('\n'.join(closing_lines) or '(없음)')
             + f'\n\n잠정 주진단: {diagnosis}')
@@ -71,6 +91,8 @@ def write_record(doctor, visit, closing_lines, diagnosis, references=''):
     said = '\n'.join(f'- {line}' for line in closing_lines)
     if said:
         note['P']['education'] = (note['P']['education'] + '\n' if note['P']['education'] else '') + '[설명함]\n' + said
+    if VERIFY_AP and any(note['A'].values()):
+        visit.verify_log['ap'] = verify_assessment_plan(doctor, visit, note, closing_lines)
     if not any(note['S'].values()):  # 기록 작성 실패 시 대화 원문이라도 남긴다
         note['S']['hpi'] = visit.transcript()
     final = clean_diagnosis(result.get('diagnosis')) or clean_diagnosis(diagnosis) or '진단 미정'
