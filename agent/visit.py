@@ -31,6 +31,7 @@ class Visit:
         self.asked = set()      # 보낸 SAY (중복 방지)
         self.exams_done = set() # 보낸 진찰 ID
         self.ddx = []
+        self.verify_log = {}    # S 검증 결과(기록용)
 
     @property
     def turn(self):

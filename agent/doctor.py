@@ -4,13 +4,16 @@ LLM은 계획·상태 갱신·글쓰기만 하고, 무엇을 보낼지(30자·�
 """
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
 
 from nova_sdk import NovaError
 
-from .knowledge import CORE_EXAMS, CORE_HISTORY, EXAMS, PEDS_HISTORY, exam_menu, is_child
+from . import config
+from .guidelines import library
+from .knowledge import CORE_EXAMS, CORE_HISTORY, EXAMS, MED_FOLLOWUPS, MED_NEGATIVE, PEDS_HISTORY, exam_menu, is_child
 from .llm import STOP_CODES, Doctor, with_retry
 from .prompts import (ANSWER_PROMPT, CHALLENGER_PROMPT, CLOSING_PROMPT, DX_RULES, MED_RULES, PLAN_PROMPT, QUESTION_RULES, REASSESS_PROMPT,
                       REPLAN_PROMPT)
@@ -31,6 +34,14 @@ def valid_question(text):
     return 0 < len(text) <= MAX_CHARS and text.count('?') <= 1
 
 
+COMPOUND_RE = re.compile(r'·|,|이나 |거나 |또는 |및 |와 |과 |랑 ')
+
+
+def is_compound(text):
+    """여러 항목을 한 번에 묻는 질문(환자가 하나만 답하거나 '하나씩 물어 달라'고 거절함)."""
+    return '?' in text and len(COMPOUND_RE.findall(text)) >= 1
+
+
 def covered(visit, keywords):
     return any(k in q for q in visit.asked for k in keywords)
 
@@ -43,6 +54,9 @@ class Consult:
         self.queue = []      # [('SAY', 문장) | ('EXAM', ID) | ('CORE', 항목) | ('REPLAN', None)]
         self.started = time.time()
         self.review = {}
+        self.keywords = []   # 지침 검색어(REASSESS가 냄)
+        self.references = ''  # 기록에 넣은 지침 발췌
+        self.rejected = []    # 복합 질문이라 보내지 않은 질문(다음 재계획에 알려 하나씩 나눠 쓰게 함)
         self.log_dir = os.getenv('NOVA_OUTPUT_DIR')  # 로컬 로그 위치(서버에선 미설정)
 
     # ---------- 행동 ----------
@@ -73,9 +87,12 @@ class Consult:
         except (NovaError, KeyError):
             pass
 
-    def say(self, text):
+    def say(self, text, check_compound=True):
         text = nfc(text)
         if not valid_question(text) or text in self.visit.asked:
+            return True
+        if check_compound and is_compound(text):
+            self.rejected.append(text)
             return True
         if not self.visit.asked and len(EMPATHY + text) <= MAX_CHARS:
             text = EMPATHY + text
@@ -105,14 +122,18 @@ class Consult:
         history = PEDS_HISTORY if is_child(self.visit.opening) else CORE_HISTORY
         self.queue += [('CORE', item) for item in history]
         self.queue.append(('REPLAN', None))  # 병력 답(약 용량 등)을 보고 진찰 전에 한 번 보완
-        self.enqueue({'exams': CORE_EXAMS + list(plan.get('exams') or [])})
+        core = CORE_EXAMS + (['MENTAL', 'ABD_PALP'] if config.CORE_EXAMS_FULL else [])
+        self.enqueue({'exams': core + list(plan.get('exams') or [])})
 
     def replan(self, front=False):
         done = ', '.join(sorted(self.visit.exams_done)) or '(없음)'
         prompt = REPLAN_PROMPT.format(med=MED_RULES, dx=DX_RULES, rules=QUESTION_RULES, done=done, menu=exam_menu())
-        update = self.doctor.ask_json(prompt,
-                                      self.visit.situation() + f'\n\n현재 감별진단: {self.visit.ddx_text()}',
-                                      max_tokens=6000, check=lambda v: 'ddx' in v or 'questions' in v)
+        user = self.visit.situation() + f'\n\n현재 감별진단: {self.visit.ddx_text()}'
+        if self.rejected:
+            user += ('\n\n보내지 않은 질문(한 번에 여러 항목을 물어서 제외됨 — 필요하면 항목 하나씩 따로 쓰세요): '
+                     + ' / '.join(self.rejected[-6:]))
+            self.rejected = []
+        update = self.doctor.ask_json(prompt, user, max_tokens=6000, check=lambda v: 'ddx' in v or 'questions' in v)
         if not update:
             return False
         self.visit.ddx = update.get('ddx') or self.visit.ddx
@@ -137,12 +158,21 @@ class Consult:
             if kind == 'CORE':
                 topic, question, keywords = item
                 ok = True if covered(self.visit, keywords) else self.say(question)
+                if topic == 'meds' and ok and self.took_medication():
+                    # 약이 있다고 하면 이름·용량·횟수·기간을 하나씩 바로 묻는다(복합 질문은 환자가 거절함)
+                    self.queue = [('SAY', q) for q, kws in MED_FOLLOWUPS if not covered(self.visit, kws)] + self.queue
             elif kind == 'SAY':
                 ok = self.say(item)
             else:
                 ok = self.exam(item)
             if not ok:
                 return
+
+    def took_medication(self):
+        """직전 SAY(복용 약 질문)의 답이 '약이 있다'인지."""
+        last = self.visit.events[-1] if self.visit.events else {}
+        reply = last.get('reply') or ''
+        return last.get('kind') == 'SAY' and bool(reply) and not any(n in reply for n in MED_NEGATIVE)
 
     def challenge(self):
         """반대 의견(악마의 변호인): 1위 진단의 모순·미배제 위험 진단을 점검하고, 판가름 질문이 있으면 남은 턴에 묻는다."""
@@ -164,7 +194,21 @@ class Consult:
                                       max_tokens=6000, check=lambda v: v.get('diagnosis')) or {}
         if isinstance(result.get('ddx'), list) and result['ddx']:
             self.visit.ddx = result['ddx']
+        self.keywords = [k for k in result.get('keywords') or [] if isinstance(k, str)][:6]
         return nfc(result.get('diagnosis')) or top
+
+    def consult_guidelines(self, diagnosis):
+        """지침 코퍼스에서 주진단 관련 검사·치료·추적 절을 찾아 기록 작성에 넘긴다(없으면 빈 문자열)."""
+        if not config.USE_GUIDELINES:
+            return ''
+        try:
+            lib = library()
+            if not lib.available():
+                return ''
+            return lib.lookup(self.keywords or [diagnosis], child=is_child(self.visit.opening))
+        except Exception as exc:  # 지침 검색 실패가 진료를 멈추면 안 된다
+            print(f'[agent] guidelines lookup failed: {exc!r}', file=sys.stderr)
+            return ''
 
     def closing(self, diagnosis):
         result = self.doctor.ask_json(CLOSING_PROMPT, self.visit.situation()
@@ -180,9 +224,9 @@ class Consult:
             if last.get('kind') != 'SAY' or '?' not in (last.get('reply') or ''):
                 break
             answer = self.doctor.ask_json(ANSWER_PROMPT, self.visit.situation() + f'\n\n주진단: {diagnosis}',
-                                          max_tokens=3000, check=lambda v: v.get('line')) or {}
-            line = nfc(answer.get('line'))
-            if not valid_question(line) or not self.speak([line]):
+                                          max_tokens=3000, check=lambda v: valid_question(v.get('line'))) or {}
+            line = nfc(answer.get('line')) or '검사 결과를 보고 자세히 설명드릴게요.'  # 답이 없거나 길면 기본 답
+            if not self.speak([line]):
                 break
             said.append(line)
         return said
@@ -194,7 +238,10 @@ class Consult:
             if self.visit.turns_left <= 0 or self.visit.seconds_left() < 90:
                 break
             before = len(self.visit.events)
-            if not self.act('SAY', line):
+            if not valid_question(line) or line in self.visit.asked:
+                continue
+            self.visit.asked.add(line)
+            if not self.act('SAY', line):  # 설명문은 복합 검사 없이 보낸다
                 break
             if len(self.visit.events) > before and self.visit.events[-1]['kind'] == 'SAY':
                 said.append(line)
@@ -206,20 +253,24 @@ class Consult:
         self.review = self.challenge()
         diagnosis = self.reassess(self.review)
         said = self.closing(diagnosis)
-        note, final = write_record(self.doctor, self.visit, said, diagnosis)
+        self.references = self.consult_guidelines(diagnosis)
+        note, final = write_record(self.doctor, self.visit, said, diagnosis, self.references)
         self.save_log(note, final)
         return self.client.diagnose(note=note, diagnosis=final)
 
     def save_log(self, note, diagnosis):
         summary = {'turns': self.visit.turn, 'doctor_calls': self.doctor.calls, 'doctor_failures': self.doctor.failures,
-                   'seconds': round(time.time() - self.started), 'ddx': self.visit.ddx, 'diagnosis': diagnosis}
+                   'seconds': round(time.time() - self.started), 'ddx': self.visit.ddx, 'diagnosis': diagnosis,
+                   'keywords': self.keywords, 'reference_chars': len(self.references)}
         print('[agent] ' + json.dumps(summary, ensure_ascii=False), file=sys.stderr)
         out = self.log_dir
         if out:
             try:
                 Path(out).mkdir(parents=True, exist_ok=True)
                 (Path(out) / 'agent_log.json').write_text(json.dumps(
-                    {**summary, 'review': self.review, 'events': self.visit.events, 'note': note}, ensure_ascii=False, indent=1), encoding='utf-8')
+                    {**summary, 'review': self.review, 'verify': self.visit.verify_log, 'references': self.references,
+                     'events': self.visit.events, 'note': note},
+                    ensure_ascii=False, indent=1), encoding='utf-8')
             except OSError:
                 pass
 

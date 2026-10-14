@@ -2,11 +2,16 @@
 
 S·A·P는 Doctor 모델이 쓰고, O.exam은 코드가 진찰 로그에서 턴 번호와 함께 직접 쓴다(지어낼 여지 없음).
 """
+import json
+import os
 import re
 
 from nova_sdk import RECORD_FIELDS, empty_record
 
-from .prompts import RECORD_PROMPT
+from . import config
+from .prompts import RECORD_PROMPT, VERIFY_PROMPT
+
+VERIFY = config.VERIFY_S and os.getenv('NOVA_VERIFY_S', '1') != '0'  # S 항목 사실 검증(Doctor 호출 1회 추가)
 
 
 HEDGES = ('의심', '잠정', '가능성', '추정', '소견', '(r/o)', 'r/o')
@@ -30,9 +35,26 @@ def _text(value):
     return str(value or '').strip()
 
 
-def write_record(doctor, visit, closing_lines, diagnosis):
+def verify_subjective(doctor, visit, note):
+    """S 초안을 대화 원문과 대조해 근거 없는 내용은 지우고 빠진 (-) 소견은 넣는다. 실패하면 초안 유지."""
+    user = visit.situation() + '\n\nS 초안\n' + json.dumps(note['S'], ensure_ascii=False, indent=1)
+    result = doctor.ask_json(VERIFY_PROMPT, user, max_tokens=8000,
+                             check=lambda v: isinstance(v.get('S'), dict) and any(_text(x) for x in v['S'].values()))
+    if not result:
+        return {'status': 'failed'}
+    fixed = {f: _text(result['S'].get(f)) for f in RECORD_FIELDS['S']}
+    # 감수가 내용을 절반 넘게 날렸으면(과잉 삭제 의심) 초안을 지킨다.
+    if sum(map(len, fixed.values())) < 0.5 * sum(map(len, note['S'].values())):
+        return {'status': 'rejected_overcut'}
+    note['S'].update(fixed)  # note에는 S/O/A/P 외 키를 넣지 않는다(SDK가 거절함)
+    return {'status': 'applied', 'removed': result.get('removed') or [], 'added': result.get('added') or []}
+
+
+def write_record(doctor, visit, closing_lines, diagnosis, references=''):
     user = (visit.situation() + '\n\n진료 마무리 설명(실제로 환자에게 한 말)\n' + ('\n'.join(closing_lines) or '(없음)')
             + f'\n\n잠정 주진단: {diagnosis}')
+    if references:
+        user += '\n\n참고 지침(발췌)\n' + references
     result = doctor.ask_json(RECORD_PROMPT, user, max_tokens=8000,
                              check=lambda v: isinstance(v.get('S'), dict)) or {}
 
@@ -44,6 +66,7 @@ def write_record(doctor, visit, closing_lines, diagnosis):
 
     note['O']['exam'] = visit.exam_findings()
     note['O']['tests'] = ''  # 예선은 검사 결과 없음
+    visit.verify_log = verify_subjective(doctor, visit, note) if VERIFY and any(note['S'].values()) else {'status': 'skipped'}
 
     said = '\n'.join(f'- {line}' for line in closing_lines)
     if said:

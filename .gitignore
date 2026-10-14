@@ -22,6 +22,7 @@ nova-benchmarks-2026/
 *.pptx
 *.zip
 !submissions/*.zip
+!submissions/candidates/*.zip
 data/private/
 
 # 실행 결과

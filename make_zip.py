@@ -2,6 +2,8 @@
 
   python make_zip.py            → build/submission.zip (run.py, requirements.txt, nova_sdk.py, agent/)
   python make_zip.py --save v0.9 → 위 ZIP을 submissions/2026-10-13_v0.9.zip 으로도 복사(팀 공유용, 커밋 대상)
+  python make_zip.py --save v1.2_noverify --candidate --set VERIFY_S=False
+                                → agent/config.py의 스위치를 바꾼 ZIP을 submissions/candidates/ 에 저장(사이트 샘플 검증 A/B용)
 """
 import datetime
 import re
@@ -29,7 +31,17 @@ def collect(src):
     return files
 
 
-def main(src, save_tag=None):
+def apply_settings(path, settings):
+    """agent/config.py 내용에서 KEY = ... 줄을 바꿔 돌려준다(파일은 건드리지 않음)."""
+    text = path.read_text(encoding='utf-8')
+    for key, value in settings.items():
+        text, n = re.subn(rf'(?m)^{re.escape(key)}\s*=\s*[^#\n]+', f'{key} = {value}  ', text)
+        if n != 1:
+            sys.exit(f'agent/config.py에 {key} 설정이 없습니다.')
+    return text
+
+
+def main(src, save_tag=None, candidate=False, settings=None):
     src = Path(src).resolve()
     if not (src / 'run.py').exists() or not (src / 'requirements.txt').exists():
         sys.exit(f'{src}에 run.py와 requirements.txt가 있어야 합니다.')
@@ -41,9 +53,15 @@ def main(src, save_tag=None):
         sys.exit('requirements.txt에 UTF-8 BOM이 있습니다. BOM 없이 저장하세요.')
     out = ROOT / 'build' / 'submission.zip'
     out.parent.mkdir(exist_ok=True)
+    config_path = src / 'agent' / 'config.py'
     with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED) as zf:
         for p in sorted(files):
-            zf.write(p, p.relative_to(src).as_posix())
+            if settings and p == config_path:
+                zf.writestr(p.relative_to(src).as_posix(), apply_settings(p, settings))
+            else:
+                zf.write(p, p.relative_to(src).as_posix())
+    if settings:
+        print('config overrides:', ', '.join(f'{k}={v}' for k, v in settings.items()))
     size = out.stat().st_size
     print(f'{out} ({size:,} bytes, {len(files)} files)')
     for p in sorted(files):
@@ -55,17 +73,28 @@ def main(src, save_tag=None):
             for info in zf.infolist():
                 if SECRET.search(zf.read(info).decode('utf-8', errors='ignore')):
                     sys.exit(f'ZIP 안 {info.filename}에 개발 키로 보이는 문자열이 있어 저장하지 않습니다.')
-        saved = ROOT / 'submissions' / f'{datetime.date.today():%Y-%m-%d}_{save_tag}.zip'
-        saved.parent.mkdir(exist_ok=True)
+        folder = ROOT / 'submissions' / ('candidates' if candidate else '')
+        saved = folder / f'{datetime.date.today():%Y-%m-%d}_{save_tag}.zip'
+        saved.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(out, saved)
         print(f'saved → {saved.relative_to(ROOT).as_posix()}')
 
 
 if __name__ == '__main__':
     args = sys.argv[1:]
-    tag = None
+    tag, candidate, settings = None, False, {}
     if '--save' in args:
         i = args.index('--save')
         tag = args[i + 1] if i + 1 < len(args) else sys.exit('--save 뒤에 버전 이름을 적어 주세요(예: v0.9)')
         del args[i:i + 2]
-    main(args[0] if args else ROOT, tag)
+    if '--candidate' in args:
+        candidate = True
+        args.remove('--candidate')
+    while '--set' in args:
+        i = args.index('--set')
+        key, _, value = (args[i + 1] if i + 1 < len(args) else '').partition('=')
+        if not key or not value:
+            sys.exit('--set KEY=VALUE 형식으로 적어 주세요(예: --set VERIFY_S=False)')
+        settings[key.strip()] = value.strip()
+        del args[i:i + 2]
+    main(args[0] if args else ROOT, tag, candidate, settings)
