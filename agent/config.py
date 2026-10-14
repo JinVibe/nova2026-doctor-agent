@@ -2,6 +2,6 @@
 
 서버에는 환경 변수를 넘길 수 없으므로 파일 상수로 둔다.
 """
-USE_GUIDELINES = True   # 지침 코퍼스 발췌를 기록 작성에 첨부(v1.0)
+USE_GUIDELINES = False  # 지침 코퍼스 발췌를 기록 작성에 첨부(v1.0). 10/14 샘플 검증에서 끄는 쪽이 +1.3(76.1 vs 74.8)
 VERIFY_S = True         # S 항목 사실 검증 호출(v1.1)
 CORE_EXAMS_FULL = False  # True면 의식·지남력과 복부 촉진도 공통 진찰에 포함(v0.9 방식)
