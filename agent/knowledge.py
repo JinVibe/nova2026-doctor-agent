@@ -5,9 +5,32 @@
 LLM은 ID만 고르고 실제 문장은 여기서 보낸다.
 """
 
+from . import config
+
 # (주제, 질문, 이미 다룬 것으로 볼 키워드) — 30자 이하, 질문 하나.
 # 주의: '이나·거나·와/과·,·' 같은 복합 표시가 들어가면 doctor.say()의 복합 질문 차단에 걸려 보내지지 않는다(v1.1~v1.5에서
 # 수술·알레르기·발달 질문이 그 이유로 빠졌음). 여기 질문은 차단 없이 보내지만 문구도 단일 항목으로 둔다.
+# v1.2(공식 68.55 기준선) 문진. 복합 질문 차단에 걸려 수술·알레르기·발달·학교는 실제로는 보내지지 않았다(v1.2 그대로 재현).
+CORE_HISTORY_V1 = [
+    ('pmh', '지금 앓고 계신 병이 있으세요?', ('앓고', '지병', '질환', '병력', '진단받')),
+    ('meds', '평소 드시는 약이 있으세요?', ('드시는 약', '복용', '먹는 약', '드시는 것')),
+    ('surgery', '수술이나 입원하신 적 있으세요?', ('수술', '입원')),
+    ('allergy', '약이나 음식 알레르기 있으세요?', ('알레르기',)),
+    ('fh', '가족 중에 앓는 병이 있으세요?', ('가족',)),
+    ('smoking', '담배는 피우세요?', ('담배', '흡연')),
+    ('alcohol', '술은 얼마나 자주 드세요?', ('술은', '술을', '술 ', '음주')),
+    ('job', '하시는 일은 무엇인가요?', ('하시는 일', '직업', '일하')),
+]
+PEDS_HISTORY_V1 = CORE_HISTORY_V1[:5] + [
+    ('birth', '몇 주에 몇 kg으로 태어났나요?', ('태어', '출생')),
+    ('develop', '걷기·말하기는 또래만큼 빨랐나요?', ('발달', '걷기', '말하기')),
+    ('vaccine', '예방접종은 제때 다 맞았나요?', ('예방접종',)),
+    ('parents', '부모님도 어릴 때 비슷하셨나요?', ('부모님도', '어릴 때')),
+    ('school', '유치원이나 학교 생활은 어떤가요?', ('유치원', '학교', '어린이집')),
+]
+CHILD_WORDS_V1 = ('보호자', '아이', '아기', '살 남자아이', '살 여자아이', '어린이', '학년')
+
+# v1.6 확장 문진(config.HISTORY_V2)
 CORE_HISTORY = [
     ('pmh', '지금 앓고 계신 병이 있으세요?', ('앓고', '지병', '질환', '병력', '진단받')),
     ('meds', '평소 드시는 약이 있으세요?', ('드시는 약', '복용', '먹는 약', '드시는 것')),
@@ -47,7 +70,7 @@ CHILD_WORDS = ('보호자', '아이', '아기', '살 남자아이', '살 여자�
 
 
 def is_child(opening):
-    return any(w in opening for w in CHILD_WORDS)
+    return any(w in opening for w in (CHILD_WORDS if config.HISTORY_V2 else CHILD_WORDS_V1))
 
 
 _TENS = {'열': 10, '스물': 20, '스무': 20, '서른': 30, '마흔': 40, '쉰': 50, '예순': 60, '일흔': 70, '여든': 80, '아흔': 90}
@@ -78,6 +101,8 @@ def is_reproductive_female(opening):
 
 def history_items(opening):
     """첫 진술에 맞는 공통 병력 문진 목록."""
+    if not config.HISTORY_V2:
+        return list(PEDS_HISTORY_V1 if is_child(opening) else CORE_HISTORY_V1)
     if is_child(opening):
         return list(PEDS_HISTORY)
     items = list(CORE_HISTORY)

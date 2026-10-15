@@ -15,13 +15,14 @@ from . import config
 from .guidelines import library
 from .knowledge import CORE_EXAMS, EXAMS, MED_FOLLOWUPS, MED_NEGATIVE, exam_menu, history_items, is_child
 from .llm import STOP_CODES, Doctor, with_retry
-from .prompts import (ANSWER_PROMPT, ANSWER_PROMPT_V2, CHALLENGER_PROMPT, CLOSING_PROMPT, CLOSING_PROMPT_V2, DX_RULES, MED_RULES,
-                      PLAN_DEDUP_RULE, PLAN_PROMPT, QUESTION_RULES, REASSESS_PROMPT, REPEAT_RULES, REPLAN_PROMPT)
+from .prompts import (ANSWER_PROMPT, ANSWER_PROMPT_V2, CHALLENGER_PROMPT, CLOSING_PROMPT, CLOSING_PROMPT_V2, CLOSING_PROMPT_V3,
+                      DX_RULES, MED_RULES, PLAN_DEDUP_RULE, PLAN_PROMPT, PLAN_QRULE_V1, PLAN_QRULE_V2, QUESTION_RULES,
+                      REASSESS_PROMPT, REASSESS_PROMPT_V1, REPEAT_RULES, REPLAN_PROMPT)
 from .record import write_record
 from .visit import MAX_CHARS, Visit, nfc
 
-TURN_BUDGET = int(os.getenv('NOVA_TURN_BUDGET', 48))  # 마무리 설명 포함 상한
-CLOSING_TURNS = 8
+TURN_BUDGET = int(os.getenv('NOVA_TURN_BUDGET', 50 if config.CLOSING_V3 else 48))  # 마무리 설명 포함 상한
+CLOSING_TURNS = 10 if config.CLOSING_V3 else 8
 ANSWER_TURNS = 2    # 마무리 설명 뒤 환자 질문에 답하는 턴
 MAX_REPLANS = 3
 TIME_MARGIN = 240   # 마감 4분 전부터 마무리·기록으로
@@ -115,6 +116,7 @@ class Consult:
 
     def plan(self):
         plan = self.doctor.ask_json(PLAN_PROMPT.format(dx=DX_RULES, rules=QUESTION_RULES, menu=exam_menu(),
+                                                       qrule=PLAN_QRULE_V2 if config.HISTORY_V2 else PLAN_QRULE_V1,
                                                        dedup=PLAN_DEDUP_RULE if config.REPEAT_GUARD else ''),
                                     self.visit.situation(), max_tokens=6000,
                                     check=lambda v: isinstance(v.get('questions'), list)) or {}
@@ -153,7 +155,7 @@ class Consult:
                 continue
             # 진찰 턴 예약: 남은 턴이 대기 중인 진찰 수 이하이면 질문을 미루고 진찰부터 한다(v1.6에서 문진이 늘어 진찰이 1회만 된 적 있음)
             pending_exams = [i for i, (k, e) in enumerate(self.queue) if k == 'EXAM' and e not in self.visit.exams_done]
-            if pending_exams and limit - self.visit.turn <= len(pending_exams) and self.queue[0][0] != 'EXAM':
+            if config.HISTORY_V2 and pending_exams and limit - self.visit.turn <= len(pending_exams) and self.queue[0][0] != 'EXAM':
                 kind, item = self.queue.pop(pending_exams[0])
             else:
                 kind, item = self.queue.pop(0)
@@ -164,7 +166,8 @@ class Consult:
                 continue
             if kind == 'CORE':
                 topic, question, keywords = item
-                ok = True if covered(self.visit, keywords) else self.say(question, check_compound=False)  # 공통 문진은 검수된 문구
+                # v1.6 문구는 단일 항목이라 차단 없이 보냄. v1.2 문구는 v1.2와 똑같이 차단을 거침(복합 문구 4개는 보내지지 않음)
+                ok = True if covered(self.visit, keywords) else self.say(question, check_compound=not config.HISTORY_V2)
                 if topic == 'meds' and ok and self.took_medication():
                     # 약이 있다고 하면 이름·용량·횟수·기간을 하나씩 바로 묻는다(복합 질문은 환자가 거절함)
                     self.queue = [('SAY', q) for q, kws in MED_FOLLOWUPS if not covered(self.visit, kws)] + self.queue
@@ -195,7 +198,7 @@ class Consult:
         """진료 전체를 다시 읽고 최종 감별진단·주진단을 정한다(후반에 나온 단서·반대 의견 반영)."""
         top = next((d.get('dx') for d in self.visit.ddx if isinstance(d, dict) and d.get('dx')), '')
         opinion = json.dumps({k: v for k, v in review.items() if k not in ('questions', 'exams')}, ensure_ascii=False)
-        result = self.doctor.ask_json(REASSESS_PROMPT.format(dx=DX_RULES),
+        result = self.doctor.ask_json((REASSESS_PROMPT if config.DX_CANDIDATES else REASSESS_PROMPT_V1).format(dx=DX_RULES),
                                       self.visit.situation() + f'\n\n진료 중 감별진단: {self.visit.ddx_text()}'
                                       f'\n\n검토 의견(반대 의견): {opinion}',
                                       max_tokens=6000, check=lambda v: v.get('diagnosis')) or {}
@@ -218,7 +221,8 @@ class Consult:
             return ''
 
     def closing(self, diagnosis):
-        result = self.doctor.ask_json(CLOSING_PROMPT_V2 if config.TALK_V2 else CLOSING_PROMPT, self.visit.situation()
+        prompt = CLOSING_PROMPT_V3 if config.CLOSING_V3 else CLOSING_PROMPT_V2 if config.TALK_V2 else CLOSING_PROMPT
+        result = self.doctor.ask_json(prompt, self.visit.situation()
                                       + f'\n\n감별진단: {self.visit.ddx_text()}\n주진단: {diagnosis}',
                                       max_tokens=4000, check=lambda v: isinstance(v.get('lines'), list)) or {}
         lines = [nfc(l) for l in result.get('lines') or [] if valid_question(l)]
@@ -236,14 +240,15 @@ class Consult:
     def answer(self, diagnosis):
         """환자의 되물음에 1~2문장으로 답한다(v2). 답이 없거나 길면 기본 답."""
         user = self.visit.situation() + f'\n\n주진단: {diagnosis}'
-        if config.TALK_V2:
+        if config.TALK_V2 or config.CLOSING_V3:
             result = self.doctor.ask_json(ANSWER_PROMPT_V2, user, max_tokens=3000,
                                           check=lambda v: isinstance(v.get('lines'), list) and any(valid_question(l) for l in v['lines'])) or {}
             lines = [nfc(l) for l in result.get('lines') or [] if valid_question(l)][:2]
         else:
             result = self.doctor.ask_json(ANSWER_PROMPT, user, max_tokens=3000, check=lambda v: valid_question(v.get('line'))) or {}
             lines = [nfc(result.get('line'))] if result.get('line') else []
-        return self.speak(lines or ['검사 결과를 보고 자세히 설명드릴게요.'])
+        fallback = '지금 말씀드린 계획대로 하면 좋아질 수 있어요.' if config.CLOSING_V3 else '검사 결과를 보고 자세히 설명드릴게요.'
+        return self.speak(lines or [fallback])
 
     def speak(self, lines):
         """설명 문장들을 차례로 말하고 실제로 전달된 문장을 돌려준다."""

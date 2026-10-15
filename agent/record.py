@@ -70,12 +70,17 @@ def verify_assessment_plan(doctor, visit, note, closing_lines):
     return {'status': 'applied', 'fixed': result.get('fixed') or []}
 
 
+FOLLOWUP_V2 = '검사 결과 확인 시점(예: 1~2주 후)과 치료 시작 후 재평가 간격(예: 4~6주마다 검사, 3~6개월마다 측정)을 각각, 재평가 항목, 전문과 의뢰 기준, 바로 응급실에 와야 하는 구체적 경고 증상'
+FOLLOWUP_V1 = '구체적 재진 시점(예: 1주 후)과 재평가 항목, 바로 응급실에 와야 하는 구체적 경고 증상'
+RECORD_PROMPT_USED = RECORD_PROMPT if config.HISTORY_V2 else RECORD_PROMPT.replace(FOLLOWUP_V2, FOLLOWUP_V1)
+
+
 def write_record(doctor, visit, closing_lines, diagnosis, references=''):
     user = (visit.situation() + '\n\n진료 마무리 설명(실제로 환자에게 한 말)\n' + ('\n'.join(closing_lines) or '(없음)')
             + f'\n\n잠정 주진단: {diagnosis}')
     if references:
         user += '\n\n참고 지침(발췌)\n' + references
-    result = doctor.ask_json(RECORD_PROMPT, user, max_tokens=8000,
+    result = doctor.ask_json(RECORD_PROMPT_USED, user, max_tokens=8000,
                              check=lambda v: isinstance(v.get('S'), dict)) or {}
 
     note = empty_record()
