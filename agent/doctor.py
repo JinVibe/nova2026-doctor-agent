@@ -226,6 +226,9 @@ class Consult:
                                       + f'\n\n감별진단: {self.visit.ddx_text()}\n주진단: {diagnosis}',
                                       max_tokens=4000, check=lambda v: isinstance(v.get('lines'), list)) or {}
         lines = [nfc(l) for l in result.get('lines') or [] if valid_question(l)]
+        if config.CLOSING_V3 and lines and not any(k in l for l in lines for k in ('뒤', '후에', '다시 오', '뵙', '재진')):
+            # 결과 확인 시점 줄이 30자를 넘어 빠진 경우(C03에서 발생) 기본 문구를 마지막 질문 줄 앞에 넣는다
+            lines.insert(len(lines) - 1 if lines[-1].endswith('?') else len(lines), '1~2주 뒤 검사 결과 보러 다시 오세요.')
         if not lines and diagnosis:
             lines = [l for l in (f'{diagnosis} 가능성이 높아 보여요.', '정확히 보려고 몇 가지 검사를 할게요.',
                                  '증상이 심해지면 바로 병원에 오세요.', '1~2주 뒤에 다시 뵐게요.') if len(l) <= MAX_CHARS]
