@@ -24,7 +24,7 @@ from .visit import MAX_CHARS, Visit, nfc
 TURN_BUDGET = int(os.getenv('NOVA_TURN_BUDGET', 50 if config.CLOSING_V3 else 48))  # 마무리 설명 포함 상한
 CLOSING_TURNS = 10 if config.CLOSING_V3 else 8
 ANSWER_TURNS = 2    # 마무리 설명 뒤 환자 질문에 답하는 턴
-MAX_REPLANS = 3
+MAX_REPLANS = 4 if config.EARLY_REPLAN else 3
 TIME_MARGIN = 240   # 마감 4분 전부터 마무리·기록으로
 EMPATHY = '많이 불편하셨겠어요. '
 REFUSALS = {'EXAM_NOT_SPECIFIC', 'EXAM_NOT_RECOGNIZED', 'CONTENT_TOO_LONG', 'EMPTY_CONTENT'}
@@ -122,6 +122,8 @@ class Consult:
                                     check=lambda v: isinstance(v.get('questions'), list)) or {}
         self.visit.ddx = plan.get('ddx') or []
         self.enqueue({'questions': plan.get('questions')})
+        if config.EARLY_REPLAN:
+            self.queue.append(('REPLAN', None))  # 계획 질문의 답(단서)을 보고 바로 뒤쫓는 질문을 앞에 끼움
         self.queue += [('CORE', item) for item in history_items(self.visit.opening)]
         self.queue.append(('REPLAN', None))  # 병력 답(약 용량 등)을 보고 진찰 전에 한 번 보완
         core = CORE_EXAMS + (['MENTAL', 'ABD_PALP'] if config.CORE_EXAMS_FULL else ['ABD_PALP'] if config.CORE_ABD else [])
@@ -155,7 +157,7 @@ class Consult:
                 continue
             # 진찰 턴 예약: 남은 턴이 대기 중인 진찰 수 이하이면 질문을 미루고 진찰부터 한다(v1.6에서 문진이 늘어 진찰이 1회만 된 적 있음)
             pending_exams = [i for i, (k, e) in enumerate(self.queue) if k == 'EXAM' and e not in self.visit.exams_done]
-            if config.HISTORY_V2 and pending_exams and limit - self.visit.turn <= len(pending_exams) and self.queue[0][0] != 'EXAM':
+            if (config.HISTORY_V2 or config.EXAM_RESERVE) and pending_exams and limit - self.visit.turn <= len(pending_exams) and self.queue[0][0] != 'EXAM':
                 kind, item = self.queue.pop(pending_exams[0])
             else:
                 kind, item = self.queue.pop(0)
@@ -167,7 +169,7 @@ class Consult:
             if kind == 'CORE':
                 topic, question, keywords = item
                 # v1.6 문구는 단일 항목이라 차단 없이 보냄. v1.2 문구는 v1.2와 똑같이 차단을 거침(복합 문구 4개는 보내지지 않음)
-                ok = True if covered(self.visit, keywords) else self.say(question, check_compound=not config.HISTORY_V2)
+                ok = True if covered(self.visit, keywords) else self.say(question, check_compound=not (config.HISTORY_V2 or config.CORE_FIX))
                 if topic == 'meds' and ok and self.took_medication():
                     # 약이 있다고 하면 이름·용량·횟수·기간을 하나씩 바로 묻는다(복합 질문은 환자가 거절함)
                     self.queue = [('SAY', q) for q, kws in MED_FOLLOWUPS if not covered(self.visit, kws)] + self.queue

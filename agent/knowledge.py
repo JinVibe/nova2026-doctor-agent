@@ -30,6 +30,26 @@ PEDS_HISTORY_V1 = CORE_HISTORY_V1[:5] + [
 ]
 CHILD_WORDS_V1 = ('보호자', '아이', '아기', '살 남자아이', '살 여자아이', '어린이', '학년')
 
+# v1.8b(config.CORE_FIX): v1.2 목록을 유지하되 복합 문구를 단일 항목으로 나눠 실제로 보내지게 함(차단 없이 전송)
+CORE_HISTORY_V1_FIXED = [
+    ('pmh', '지금 앓고 계신 병이 있으세요?', ('앓고', '지병', '질환', '병력', '진단받')),
+    ('meds', '평소 드시는 약이 있으세요?', ('드시는 약', '복용', '먹는 약', '드시는 것')),
+    ('surgery', '수술받으신 적 있으세요?', ('수술',)),
+    ('admission', '입원하신 적 있으세요?', ('입원',)),
+    ('allergy', '알레르기가 있으세요?', ('알레르기',)),
+    ('fh', '가족 중에 앓는 병이 있으세요?', ('가족',)),
+    ('smoking', '담배는 피우세요?', ('담배', '흡연')),
+    ('alcohol', '술은 얼마나 자주 드세요?', ('술은', '술을', '술 ', '음주')),
+    ('job', '하시는 일은 무엇인가요?', ('하시는 일', '직업', '일하')),
+]
+PEDS_HISTORY_V1_FIXED = CORE_HISTORY_V1_FIXED[:6] + [
+    ('birth', '몇 주에 몇 kg으로 태어났나요?', ('태어', '출생')),
+    ('develop', '발달은 또래와 비슷했나요?', ('발달', '걷기', '말하기')),
+    ('vaccine', '예방접종은 제때 다 맞았나요?', ('예방접종',)),
+    ('parents', '부모님도 어릴 때 비슷하셨나요?', ('부모님도', '어릴 때')),
+    ('school', '학교 생활은 어떤가요?', ('유치원', '학교', '어린이집')),
+]
+
 # v1.6 확장 문진(config.HISTORY_V2)
 CORE_HISTORY = [
     ('pmh', '지금 앓고 계신 병이 있으세요?', ('앓고', '지병', '질환', '병력', '진단받')),
@@ -102,6 +122,8 @@ def is_reproductive_female(opening):
 def history_items(opening):
     """첫 진술에 맞는 공통 병력 문진 목록."""
     if not config.HISTORY_V2:
+        if config.CORE_FIX:
+            return list(PEDS_HISTORY_V1_FIXED if is_child(opening) else CORE_HISTORY_V1_FIXED)
         return list(PEDS_HISTORY_V1 if is_child(opening) else CORE_HISTORY_V1)
     if is_child(opening):
         return list(PEDS_HISTORY)
