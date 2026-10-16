@@ -21,14 +21,14 @@ from .prompts import (ANSWER_PROMPT, ANSWER_PROMPT_V2, CHALLENGER_PROMPT, CLOSIN
 from .record import write_record
 from .visit import MAX_CHARS, Visit, nfc
 
-TURN_BUDGET = int(os.getenv('NOVA_TURN_BUDGET', 50 if config.CLOSING_V3 else 48))  # 마무리 설명 포함 상한
+TURN_BUDGET = int(os.getenv('NOVA_TURN_BUDGET', config.TURN_BUDGET or (50 if config.CLOSING_V3 else 48)))  # 마무리 설명 포함 상한
 CLOSING_TURNS = 10 if config.CLOSING_V3 else 8
 ANSWER_TURNS = 2    # 마무리 설명 뒤 환자 질문에 답하는 턴
 MAX_REPLANS = 4 if config.EARLY_REPLAN else 3
 TIME_MARGIN = 240   # 마감 4분 전부터 마무리·기록으로
 EMPATHY = '많이 불편하셨겠어요. '
 REFUSALS = {'EXAM_NOT_SPECIFIC', 'EXAM_NOT_RECOGNIZED', 'CONTENT_TOO_LONG', 'EMPTY_CONTENT'}
-MAX_EXAMS = 7 if config.EXAM_TRIM else 99   # 공통 3 + 계획 ≤4 (+ 재계획 ≤2는 상한 안에서만)
+MAX_EXAMS = (6 if config.TURN_BUDGET and config.TURN_BUDGET <= 40 else 7) if config.EXAM_TRIM else 99   # 공통 3 + 계획 ≤4(짧은 진료는 ≤3)
 
 
 def valid_question(text):
@@ -157,7 +157,7 @@ class Consult:
         self.visit.ddx = update.get('ddx') or self.visit.ddx
         added = self.enqueue(update, front, max_exams=2 if config.EXAM_TRIM else None)
         summary = nfc(update.get('summary') or '') if config.COVERAGE_PLAN else ''
-        if summary and valid_question(summary) and not self.summarized and not is_compound(summary):
+        if summary and valid_question(summary) and not self.summarized:  # 요약문은 질문이 아니라 복합 검사를 거치지 않음
             self.summarized = True
             self.queue.insert(0, ('SAY', summary))  # 진찰로 넘어가기 전 요약 확인(의사소통: 이해 확인)
             added += 1
@@ -192,7 +192,7 @@ class Consult:
                     # 약이 있다고 하면 이름·용량·횟수·기간을 하나씩 바로 묻는다(복합 질문은 환자가 거절함)
                     self.queue = [('SAY', q) for q, kws in MED_FOLLOWUPS if not covered(self.visit, kws)] + self.queue
             elif kind == 'SAY':
-                ok = self.say(item)
+                ok = self.say(item, check_compound=not (config.COVERAGE_PLAN and item.endswith('맞나요?')))
             else:
                 ok = self.exam(item)
             if not ok:
