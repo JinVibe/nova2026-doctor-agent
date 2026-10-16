@@ -13,7 +13,8 @@ from nova_sdk import NovaError
 
 from . import config
 from .guidelines import library
-from .knowledge import CORE_EXAMS, EXAMS, ICE_HISTORY, MED_FOLLOWUPS, MED_NEGATIVE, exam_menu, history_items, is_child
+from .knowledge import (CORE_EXAMS, EXAMS, ICE_HISTORY, MED_FOLLOWUPS, MED_NEGATIVE, MED_RISK_FOLLOWUPS, MED_RISK_WORDS, exam_menu,
+                        history_items, is_child)
 from .llm import STOP_CODES, Doctor, with_retry
 from .prompts import (ANSWER_PROMPT, ANSWER_PROMPT_V2, CHALLENGER_PROMPT, CLOSING_PROMPT, CLOSING_PROMPT_V2, CLOSING_PROMPT_V3,
                       COVERAGE_RULE, DX_RULES, MED_RULES, PLAN_DEDUP_RULE, PLAN_PROMPT, PLAN_QRULE_V1, PLAN_QRULE_V2,
@@ -190,13 +191,22 @@ class Consult:
                 ok = True if covered(self.visit, keywords) else self.say(question, check_compound=not (config.HISTORY_V2 or config.CORE_FIX))
                 if topic == 'meds' and ok and self.took_medication():
                     # 약이 있다고 하면 이름·용량·횟수·기간을 하나씩 바로 묻는다(복합 질문은 환자가 거절함)
-                    self.queue = [('SAY', q) for q, kws in MED_FOLLOWUPS if not covered(self.visit, kws)] + self.queue
+                    followups = list(MED_FOLLOWUPS)
+                    if config.MED_RISK and self.risky_medication():
+                        followups = followups[:2] + MED_RISK_FOLLOWUPS + followups[2:]  # 이름·용량 다음에 증량·초과·금단을 먼저
+                    self.queue = [('SAY', q) for q, kws in followups if not covered(self.visit, kws)] + self.queue
             elif kind == 'SAY':
                 ok = self.say(item, check_compound=not (config.COVERAGE_PLAN and item.endswith('맞나요?')))
             else:
                 ok = self.exam(item)
             if not ok:
                 return
+
+    def risky_medication(self):
+        """첫 진술이나 직전 답에 의존성 위험 약이 언급됐는지."""
+        last = self.visit.events[-1] if self.visit.events else {}
+        text = (last.get('reply') or '') + ' ' + self.visit.opening
+        return any(w in text for w in MED_RISK_WORDS)
 
     def took_medication(self):
         """직전 SAY(복용 약 질문)의 답이 '약이 있다'인지."""
