@@ -13,11 +13,11 @@ from nova_sdk import NovaError
 
 from . import config
 from .guidelines import library
-from .knowledge import CORE_EXAMS, EXAMS, MED_FOLLOWUPS, MED_NEGATIVE, exam_menu, history_items, is_child
+from .knowledge import CORE_EXAMS, EXAMS, ICE_HISTORY, MED_FOLLOWUPS, MED_NEGATIVE, exam_menu, history_items, is_child
 from .llm import STOP_CODES, Doctor, with_retry
 from .prompts import (ANSWER_PROMPT, ANSWER_PROMPT_V2, CHALLENGER_PROMPT, CLOSING_PROMPT, CLOSING_PROMPT_V2, CLOSING_PROMPT_V3,
-                      DX_RULES, MED_RULES, PLAN_DEDUP_RULE, PLAN_PROMPT, PLAN_QRULE_V1, PLAN_QRULE_V2, QUESTION_RULES,
-                      REASSESS_PROMPT, REASSESS_PROMPT_V1, REPEAT_RULES, REPLAN_PROMPT)
+                      COVERAGE_RULE, DX_RULES, MED_RULES, PLAN_DEDUP_RULE, PLAN_PROMPT, PLAN_QRULE_V1, PLAN_QRULE_V2,
+                      QUESTION_RULES, REASSESS_PROMPT, REASSESS_PROMPT_V1, REPEAT_RULES, REPLAN_PROMPT)
 from .record import write_record
 from .visit import MAX_CHARS, Visit, nfc
 
@@ -28,6 +28,7 @@ MAX_REPLANS = 4 if config.EARLY_REPLAN else 3
 TIME_MARGIN = 240   # 마감 4분 전부터 마무리·기록으로
 EMPATHY = '많이 불편하셨겠어요. '
 REFUSALS = {'EXAM_NOT_SPECIFIC', 'EXAM_NOT_RECOGNIZED', 'CONTENT_TOO_LONG', 'EMPTY_CONTENT'}
+MAX_EXAMS = 7 if config.EXAM_TRIM else 99   # 공통 3 + 계획 ≤4 (+ 재계획 ≤2는 상한 안에서만)
 
 
 def valid_question(text):
@@ -58,6 +59,7 @@ class Consult:
         self.keywords = []   # 지침 검색어(REASSESS가 냄)
         self.references = ''  # 기록에 넣은 지침 발췌
         self.rejected = []    # 복합 질문이라 보내지 않은 질문(다음 재계획에 알려 하나씩 나눠 쓰게 함)
+        self.summarized = False  # 진찰 전 요약 확인을 한 번만(COVERAGE_PLAN)
         self.log_dir = os.getenv('NOVA_OUTPUT_DIR')  # 로컬 로그 위치(서버에선 미설정)
 
     # ---------- 행동 ----------
@@ -101,39 +103,49 @@ class Consult:
         return self.act('SAY', text)
 
     def exam(self, eid):
-        if eid not in EXAMS or eid in self.visit.exams_done:
+        if eid not in EXAMS or eid in self.visit.exams_done or len(self.visit.exams_done) >= MAX_EXAMS:
             return True
         self.visit.exams_done.add(eid)
         return self.act('EXAM', EXAMS[eid][1])
 
     # ---------- 계획 ----------
-    def enqueue(self, plan, front=False):
+    def enqueue(self, plan, front=False, max_exams=None):
         questions = [q for q in plan.get('questions') or [] if isinstance(q, str)]
         exams = [e for e in plan.get('exams') or [] if e in EXAMS]
+        if max_exams is not None:
+            exams = exams[:max_exams]
         items = [('SAY', q) for q in questions] + [('EXAM', e) for e in exams]
         self.queue = items + self.queue if front else self.queue + items
         return len(items)
 
     def plan(self):
-        plan = self.doctor.ask_json(PLAN_PROMPT.format(dx=DX_RULES, rules=QUESTION_RULES, menu=exam_menu(),
-                                                       qrule=PLAN_QRULE_V2 if config.HISTORY_V2 else PLAN_QRULE_V1,
-                                                       dedup=PLAN_DEDUP_RULE if config.REPEAT_GUARD else ''),
+        prompt = PLAN_PROMPT.format(dx=DX_RULES, rules=QUESTION_RULES, menu=exam_menu(),
+                                    qrule=PLAN_QRULE_V2 if config.HISTORY_V2 else PLAN_QRULE_V1,
+                                    dedup=PLAN_DEDUP_RULE if config.REPEAT_GUARD else '')
+        if config.EXAM_TRIM:
+            prompt = prompt.replace('진찰 ID 5~10개', '진찰 ID 3~4개(감별을 직접 가르는 것만)')
+        plan = self.doctor.ask_json(prompt,
                                     self.visit.situation(), max_tokens=6000,
                                     check=lambda v: isinstance(v.get('questions'), list)) or {}
         self.visit.ddx = plan.get('ddx') or []
         self.enqueue({'questions': plan.get('questions')})
         if config.EARLY_REPLAN:
             self.queue.append(('REPLAN', None))  # 계획 질문의 답(단서)을 보고 바로 뒤쫓는 질문을 앞에 끼움
+        if config.ICE:
+            self.queue += [('CORE', item) for item in ICE_HISTORY]  # 환자 관점·기능 영향(공통 문진처럼 코드가 보장)
         self.queue += [('CORE', item) for item in history_items(self.visit.opening)]
         self.queue.append(('REPLAN', None))  # 병력 답(약 용량 등)을 보고 진찰 전에 한 번 보완
         core = CORE_EXAMS + (['MENTAL', 'ABD_PALP'] if config.CORE_EXAMS_FULL else ['ABD_PALP'] if config.CORE_ABD else [])
-        self.enqueue({'exams': core + list(plan.get('exams') or [])})
+        self.enqueue({'exams': core + list(plan.get('exams') or [])}, max_exams=(3 + 4) if config.EXAM_TRIM else None)
 
     def replan(self, front=False):
         done = ', '.join(sorted(self.visit.exams_done)) or '(없음)'
         guard = config.REPEAT_GUARD
+        cov = config.COVERAGE_PLAN
         prompt = REPLAN_PROMPT.format(med=MED_RULES, dx=DX_RULES, rules=QUESTION_RULES, done=done, menu=exam_menu(),
-                                      known='"known": ["이미 확인된 사실"], ' if guard else '', repeat=REPEAT_RULES if guard else '')
+                                      known='"known": ["이미 확인된 사실"], ' if guard else '', repeat=REPEAT_RULES if guard else '',
+                                      coverage=COVERAGE_RULE if cov else '',
+                                      coverage_fields=' "coverage": {{"covered": ["차원 번호"], "missing": ["차원 번호"]}}, "summary": "확인 요약 한 문장",' if cov else '')
         user = self.visit.situation() + f'\n\n현재 감별진단: {self.visit.ddx_text()}'
         if self.rejected:
             user += ('\n\n보내지 않은 질문(한 번에 여러 항목을 물어서 제외됨 — 필요하면 항목 하나씩 따로 쓰세요): '
@@ -143,7 +155,13 @@ class Consult:
         if not update:
             return False
         self.visit.ddx = update.get('ddx') or self.visit.ddx
-        return self.enqueue(update, front) > 0  # 추가할 것이 없으면(enough 포함) 마무리로
+        added = self.enqueue(update, front, max_exams=2 if config.EXAM_TRIM else None)
+        summary = nfc(update.get('summary') or '') if config.COVERAGE_PLAN else ''
+        if summary and valid_question(summary) and not self.summarized and not is_compound(summary):
+            self.summarized = True
+            self.queue.insert(0, ('SAY', summary))  # 진찰로 넘어가기 전 요약 확인(의사소통: 이해 확인)
+            added += 1
+        return added > 0  # 추가할 것이 없으면(enough 포함) 마무리로
 
     # ---------- 단계 ----------
     def gather(self, allow_replan=True):

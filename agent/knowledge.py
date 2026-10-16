@@ -89,6 +89,14 @@ PEDS_HISTORY = [c for c in CORE_HISTORY if c[0] in ('pmh', 'meds', 'surgery', 'a
 CHILD_WORDS = ('보호자', '아이', '아기', '살 남자아이', '살 여자아이', '어린이', '학년', '남아', '여아', '엄마', '아빠')
 
 
+# 환자 관점(ICE)·기능 영향. 계획 질문 뒤, 공통 문진 앞에 묻는다(config.ICE).
+ICE_HISTORY = [
+    ('impact', '이 문제로 일상생활에 지장이 얼마나 되나요?', ('지장', '일상생활', '생활에')),
+    ('concern', '가장 걱정되는 점은 무엇인가요?', ('걱정되는', '걱정이')),
+    ('expect', '오늘 진료에서 바라시는 점이 있나요?', ('바라시', '원하시는 것', '기대')),
+]
+
+
 def is_child(opening):
     return any(w in opening for w in (CHILD_WORDS if config.HISTORY_V2 else CHILD_WORDS_V1))
 
