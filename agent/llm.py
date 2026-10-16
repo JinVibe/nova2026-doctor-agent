@@ -59,13 +59,22 @@ class Doctor:
         self.effort = effort
         self.calls = 0
         self.failures = 0
+        self.usage = {}  # 서버 usage 필드 누적(prompt_tokens·completion_tokens…). 효율 점수의 절반이 Doctor 비용(10/16 운영진 메일)
 
     def ask(self, system, user, max_tokens=4096):
         self.calls += 1
         completion = with_retry(self.client.chat, [{'role': 'system', 'content': system},
                                                    {'role': 'user', 'content': user}],
                                 max_tokens=max_tokens, reasoning_effort=self.effort)
+        self.add_usage(completion.get('usage'))
         return completion['choices'][0]['message'].get('content') or ''
+
+    def add_usage(self, usage, prefix=''):
+        for key, value in (usage or {}).items():
+            if isinstance(value, dict):
+                self.add_usage(value, prefix + key + '.')
+            elif isinstance(value, (int, float)):
+                self.usage[prefix + key] = self.usage.get(prefix + key, 0) + value
 
     def ask_json(self, system, user, *, max_tokens=4096, check=None, tries=2):
         """JSON 객체 하나를 받는다. 형식이 틀리면 한 번 더 묻고, 호출이 실패하면 None."""

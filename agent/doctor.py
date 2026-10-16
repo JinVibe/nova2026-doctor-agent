@@ -312,6 +312,7 @@ class Consult:
 
     def save_log(self, note, diagnosis):
         summary = {'turns': self.visit.turn, 'doctor_calls': self.doctor.calls, 'doctor_failures': self.doctor.failures,
+                   'doctor_usage': self.doctor.usage,
                    'seconds': round(time.time() - self.started), 'ddx': self.visit.ddx, 'diagnosis': diagnosis,
                    'keywords': self.keywords, 'reference_chars': len(self.references)}
         print('[agent] ' + json.dumps(summary, ensure_ascii=False), file=sys.stderr)
