@@ -13,12 +13,12 @@ from nova_sdk import NovaError
 
 from . import config
 from .guidelines import library
-from .knowledge import (CORE_EXAMS, EXAMS, ICE_HISTORY, MED_FOLLOWUPS, MED_NEGATIVE, MED_RISK_FOLLOWUPS, MED_RISK_WORDS, exam_menu,
-                        history_items, is_child)
+from .knowledge import (CORE_EXAMS, EXAMS, ICE_HISTORY, MED_FOLLOWUPS, MED_FOLLOWUPS_V3, MED_NEGATIVE, MED_RISK_FOLLOWUPS, MED_RISK_WORDS,
+                        exam_menu, history_items, is_child)
 from .llm import STOP_CODES, Doctor, with_retry
 from .prompts import (ANSWER_PROMPT, ANSWER_PROMPT_V2, CHALLENGER_PROMPT, CLOSING_PROMPT, CLOSING_PROMPT_V2, CLOSING_PROMPT_V3,
                       COVERAGE_RULE, DX_RULES, MED_RULES, PLAN_DEDUP_RULE, PLAN_PROMPT, PLAN_QRULE_V1, PLAN_QRULE_V2,
-                      QUESTION_RULES, REASSESS_PROMPT, REASSESS_PROMPT_V1, REPEAT_RULES, REPLAN_PROMPT)
+                      PLAN_QRULE_V3, QUESTION_RULES, REASSESS_PROMPT, REASSESS_PROMPT_V1, REPEAT_RULES, REPLAN_PROMPT, THREAD_RULE)
 from .record import write_record
 from .visit import MAX_CHARS, Visit, nfc
 
@@ -121,7 +121,7 @@ class Consult:
 
     def plan(self):
         prompt = PLAN_PROMPT.format(dx=DX_RULES, rules=QUESTION_RULES, menu=exam_menu(),
-                                    qrule=PLAN_QRULE_V2 if config.HISTORY_V2 else PLAN_QRULE_V1,
+                                    qrule=PLAN_QRULE_V3 if config.THREAD else PLAN_QRULE_V2 if config.HISTORY_V2 else PLAN_QRULE_V1,
                                     dedup=PLAN_DEDUP_RULE if config.REPEAT_GUARD else '')
         if config.EXAM_TRIM:
             prompt = prompt.replace('진찰 ID 5~10개', '진찰 ID 3~4개(감별을 직접 가르는 것만)')
@@ -129,6 +129,8 @@ class Consult:
                                     self.visit.situation(), max_tokens=6000,
                                     check=lambda v: isinstance(v.get('questions'), list)) or {}
         self.visit.ddx = plan.get('ddx') or []
+        if config.THREAD:
+            plan['questions'] = (plan.get('questions') or [])[:7]  # 선별 질문이 공통 문진·재계획 턴을 먹지 않게
         self.enqueue({'questions': plan.get('questions')})
         if config.EARLY_REPLAN:
             self.queue.append(('REPLAN', None))  # 계획 질문의 답(단서)을 보고 바로 뒤쫓는 질문을 앞에 끼움
@@ -145,7 +147,7 @@ class Consult:
         cov = config.COVERAGE_PLAN
         prompt = REPLAN_PROMPT.format(med=MED_RULES, dx=DX_RULES, rules=QUESTION_RULES, done=done, menu=exam_menu(),
                                       known='"known": ["이미 확인된 사실"], ' if guard else '', repeat=REPEAT_RULES if guard else '',
-                                      coverage=COVERAGE_RULE if cov else '',
+                                      coverage=COVERAGE_RULE if cov else THREAD_RULE if config.THREAD else '',
                                       coverage_fields=' "coverage": {{"covered": ["차원 번호"], "missing": ["차원 번호"]}}, "summary": "확인 요약 한 문장",' if cov else '')
         user = self.visit.situation() + f'\n\n현재 감별진단: {self.visit.ddx_text()}'
         if self.rejected:
@@ -176,6 +178,12 @@ class Consult:
                 continue
             # 진찰 턴 예약: 남은 턴이 대기 중인 진찰 수 이하이면 질문을 미루고 진찰부터 한다(v1.6에서 문진이 늘어 진찰이 1회만 된 적 있음)
             pending_exams = [i for i, (k, e) in enumerate(self.queue) if k == 'EXAM' and e not in self.visit.exams_done]
+            if config.THREAD and self.queue[0][0] == 'SAY':
+                # 공통 문진 턴 예약: 남은 턴이 (대기 진찰 + 아직 안 물은 공통 문진) 이하면 계획·재계획 질문을 버린다(가족력·음주·직업이 통째로 빠진 38턴 C01)
+                pending_core = [i for i, (k, it) in enumerate(self.queue) if k == 'CORE' and not covered(self.visit, it[2])]
+                if limit - self.visit.turn <= len(pending_exams) + len(pending_core):
+                    self.queue.pop(0)
+                    continue
             if (config.HISTORY_V2 or config.EXAM_RESERVE) and pending_exams and limit - self.visit.turn <= len(pending_exams) and self.queue[0][0] != 'EXAM':
                 kind, item = self.queue.pop(pending_exams[0])
             else:
@@ -191,9 +199,10 @@ class Consult:
                 ok = True if covered(self.visit, keywords) else self.say(question, check_compound=not (config.HISTORY_V2 or config.CORE_FIX))
                 if topic == 'meds' and ok and self.took_medication():
                     # 약이 있다고 하면 이름·용량·횟수·기간을 하나씩 바로 묻는다(복합 질문은 환자가 거절함)
-                    followups = list(MED_FOLLOWUPS)
+                    followups = list(MED_FOLLOWUPS_V3 if config.THREAD else MED_FOLLOWUPS)
                     if config.MED_RISK and self.risky_medication():
-                        followups = followups[:2] + MED_RISK_FOLLOWUPS + followups[2:]  # 이름·용량 다음에 증량·초과·금단을 먼저
+                        head = 3 if config.THREAD else 2  # 이름·(mg)·알 수 다음에 증량·초과·금단을 먼저
+                        followups = followups[:head] + MED_RISK_FOLLOWUPS + followups[head:]
                     self.queue = [('SAY', q) for q, kws in followups if not covered(self.visit, kws)] + self.queue
             elif kind == 'SAY':
                 ok = self.say(item, check_compound=not (config.COVERAGE_PLAN and item.endswith('맞나요?')))
