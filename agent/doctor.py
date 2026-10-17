@@ -130,7 +130,7 @@ class Consult:
                                     check=lambda v: isinstance(v.get('questions'), list)) or {}
         self.visit.ddx = plan.get('ddx') or []
         if config.THREAD:
-            plan['questions'] = (plan.get('questions') or [])[:7]  # 선별 질문이 공통 문진·재계획 턴을 먹지 않게
+            plan['questions'] = (plan.get('questions') or [])[:6 if TURN_BUDGET <= 40 else 7]  # 선별 질문이 공통 문진·재계획 턴을 먹지 않게
         self.enqueue({'questions': plan.get('questions')})
         if config.EARLY_REPLAN:
             self.queue.append(('REPLAN', None))  # 계획 질문의 답(단서)을 보고 바로 뒤쫓는 질문을 앞에 끼움
@@ -203,7 +203,11 @@ class Consult:
                     if config.MED_RISK and self.risky_medication():
                         head = 3 if config.THREAD else 2  # 이름·(mg)·알 수 다음에 증량·초과·금단을 먼저
                         followups = followups[:head] + MED_RISK_FOLLOWUPS + followups[head:]
-                    self.queue = [('SAY', q) for q, kws in followups if not covered(self.visit, kws)] + self.queue
+                    pending = [(q, kws) for q, kws in followups if not covered(self.visit, kws)]
+                    if config.THREAD:  # 약 후속은 공통 문진처럼 보호(턴 예약에서 계획 질문보다 먼저 지켜짐)
+                        self.queue = [('CORE', ('medfu', q, kws)) for q, kws in pending] + self.queue
+                    else:
+                        self.queue = [('SAY', q) for q, kws in pending] + self.queue
             elif kind == 'SAY':
                 ok = self.say(item, check_compound=not (config.COVERAGE_PLAN and item.endswith('맞나요?')))
             else:
