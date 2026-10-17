@@ -100,6 +100,12 @@ class Consult:
             return True
         if not self.visit.asked and len(EMPATHY + text) <= MAX_CHARS:
             text = EMPATHY + text
+        elif config.ACK and text.endswith('?'):
+            last = self.visit.events[-1] if self.visit.events else {}
+            if last.get('kind') == 'SAY' and last.get('reply'):
+                ack = '네. ' if any(n in last['reply'] for n in ('아니요', '아뇨', '없어요', '없습니다')) else ('그렇군요. ', '네, 알겠습니다. ')[len(self.visit.asked) % 2]
+                if len(ack + text) <= MAX_CHARS:
+                    text = ack + text
         self.visit.asked.add(nfc(text))
         return self.act('SAY', text)
 
@@ -178,9 +184,11 @@ class Consult:
                 continue
             # 진찰 턴 예약: 남은 턴이 대기 중인 진찰 수 이하이면 질문을 미루고 진찰부터 한다(v1.6에서 문진이 늘어 진찰이 1회만 된 적 있음)
             pending_exams = [i for i, (k, e) in enumerate(self.queue) if k == 'EXAM' and e not in self.visit.exams_done]
-            if config.THREAD and self.queue[0][0] == 'SAY':
+            if (config.THREAD or config.MEDCORE) and self.queue[0][0] == 'SAY':
                 # 공통 문진 턴 예약: 남은 턴이 (대기 진찰 + 아직 안 물은 공통 문진) 이하면 계획·재계획 질문을 버린다(가족력·음주·직업이 통째로 빠진 38턴 C01)
-                pending_core = [i for i, (k, it) in enumerate(self.queue) if k == 'CORE' and not covered(self.visit, it[2])]
+                compound_check = not (config.HISTORY_V2 or config.CORE_FIX or config.THREAD)
+                pending_core = [i for i, (k, it) in enumerate(self.queue) if k == 'CORE' and not covered(self.visit, it[2])
+                                and not (compound_check and is_compound(it[1]))]  # 복합 문구라 결국 안 보낼 항목은 예약에서 빼서 계획 질문을 과하게 버리지 않게
                 if limit - self.visit.turn <= len(pending_exams) + len(pending_core):
                     self.queue.pop(0)
                     continue
@@ -199,12 +207,12 @@ class Consult:
                 ok = True if covered(self.visit, keywords) else self.say(question, check_compound=not (config.HISTORY_V2 or config.CORE_FIX))
                 if topic == 'meds' and ok and self.took_medication():
                     # 약이 있다고 하면 이름·용량·횟수·기간을 하나씩 바로 묻는다(복합 질문은 환자가 거절함)
-                    followups = list(MED_FOLLOWUPS_V3 if config.THREAD else MED_FOLLOWUPS)
+                    followups = list(MED_FOLLOWUPS_V3 if (config.THREAD or config.MEDCORE) else MED_FOLLOWUPS)
                     if config.MED_RISK and self.risky_medication():
-                        head = 3 if config.THREAD else 2  # 이름·(mg)·알 수 다음에 증량·초과·금단을 먼저
+                        head = 3 if (config.THREAD or config.MEDCORE) else 2  # 이름·(mg)·알 수 다음에 증량·초과·금단을 먼저
                         followups = followups[:head] + MED_RISK_FOLLOWUPS + followups[head:]
                     pending = [(q, kws) for q, kws in followups if not covered(self.visit, kws)]
-                    if config.THREAD:  # 약 후속은 공통 문진처럼 보호(턴 예약에서 계획 질문보다 먼저 지켜짐)
+                    if config.THREAD or config.MEDCORE:  # 약 후속은 공통 문진처럼 보호(턴 예약에서 계획 질문보다 먼저 지켜짐)
                         self.queue = [('CORE', ('medfu', q, kws)) for q, kws in pending] + self.queue
                     else:
                         self.queue = [('SAY', q) for q, kws in pending] + self.queue
