@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>__TITLE__</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Serif+KR:wght@500;700&family=IBM+Plex+Sans+KR:wght@400;500;600&display=swap">
+<style>
+/* 레이아웃: 왼쪽 세로 타임라인(데스크톱 고정) + 오른쪽 진료실 대화. 폰에서는 타임라인이 가로 띠로. */
+:root {
+  --bg: #f6f3ec;        /* 진료실 종이 */
+  --fg: #2a2b30;
+  --muted: #6b6e78;
+  --line: #ddd7ca;
+  --panel: #fffdf8;
+  --doc: #e3ecf0;       /* 의사 말풍선: 차가운 청회색 */
+  --doc-ink: #1f3a46;
+  --pt: #f3e4cf;        /* 환자 말풍선: 따뜻한 모래색 */
+  --pt-ink: #4a3620;
+  --exam: #ece7dc;
+  --accent: #2e7d84;    /* 청록 */
+  --warm: #c2642b;      /* 수용 표현 강조 */
+  --good: #2f7a4a;
+  --bad: #b23a3a;
+  --closing: #f9f1ff;
+  --closing-ink: #4b3a66;
+  --display: 'Noto Serif KR', 'Nanum Myeongjo', serif;
+  --body: 'IBM Plex Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #1b1d22; --fg: #e8e5dd; --muted: #a2a4ac; --line: #343842; --panel: #23262d;
+  --doc: #223842; --doc-ink: #d6e6ec; --pt: #3d3225; --pt-ink: #f0dfc6; --exam: #2c2f37;
+  --accent: #5fb3b9; --warm: #e0905c; --good: #6cc48a; --bad: #e07a7a; --closing: #2d2738; --closing-ink: #d9cdee; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #1b1d22; --fg: #e8e5dd; --muted: #a2a4ac; --line: #343842; --panel: #23262d;
+  --doc: #223842; --doc-ink: #d6e6ec; --pt: #3d3225; --pt-ink: #f0dfc6; --exam: #2c2f37;
+  --accent: #5fb3b9; --warm: #e0905c; --good: #6cc48a; --bad: #e07a7a; --closing: #2d2738; --closing-ink: #d9cdee; color-scheme: dark }
+
+body { background: var(--bg); color: var(--fg); font-family: var(--body); font-size: 15px; line-height: 1.55;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); padding-block: 0 48px; }
+* { box-sizing: border-box; }
+h1, h2, h3 { font-family: var(--display); text-wrap: balance; margin: 0; }
+.wrap { max-width: 1180px; margin: 0 auto; }
+header.top { padding-block: 36px 20px; border-bottom: 1px solid var(--line); display: grid; gap: 14px; }
+header.top h1 { font-size: clamp(26px, 4vw, 38px); font-weight: 700; letter-spacing: -0.01em; }
+header.top p { margin: 0; color: var(--muted); max-width: 64ch; }
+.case { display: flex; flex-wrap: wrap; gap: 8px 18px; font-size: 13px; color: var(--muted); }
+.case b { color: var(--fg); font-weight: 600; }
+
+.chart { margin-top: 18px; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 14px 16px 8px; }
+.chart h2 { font-size: 15px; font-weight: 600; margin-bottom: 4px; font-family: var(--body); }
+.chart .sub { font-size: 12.5px; color: var(--muted); margin: 0 0 6px; }
+.chart svg { width: 100%; height: auto; display: block; }
+.chart text { font-family: var(--body); fill: var(--muted); font-size: 11px; }
+.chart .pt-label { fill: var(--fg); font-weight: 600; }
+
+main { display: grid; grid-template-columns: 260px minmax(0, 1fr); gap: 28px; padding-top: 24px; }
+nav.timeline { position: sticky; top: env(safe-area-inset-top, 0px); align-self: start; max-height: calc(100vh - 24px); overflow: auto; padding-right: 4px; }
+nav.timeline ol { list-style: none; margin: 0; padding: 0 0 0 18px; border-left: 2px solid var(--line); display: grid; gap: 4px; }
+nav.timeline li { position: relative; }
+nav.timeline li::before { content: ""; position: absolute; left: -24px; top: 14px; width: 10px; height: 10px; border-radius: 50%; background: var(--line); border: 2px solid var(--bg); }
+nav.timeline li.on::before { background: var(--accent); }
+nav.timeline li.wrong::before { background: var(--bad); }
+nav.timeline li.none::before { background: var(--line); }
+nav.timeline button { all: unset; display: block; width: 100%; cursor: pointer; padding: 8px 10px; border-radius: 6px; line-height: 1.35; }
+nav.timeline button:hover { background: var(--panel); }
+nav.timeline li.on button { background: var(--panel); box-shadow: inset 0 0 0 1px var(--line); }
+nav.timeline button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+nav.timeline .l { font-weight: 600; font-size: 14px; }
+nav.timeline .d { font-size: 12px; color: var(--muted); display: flex; gap: 8px; }
+nav.timeline .d .s { font-variant-numeric: tabular-nums; }
+
+section.stage { min-width: 0; }
+.stagehead { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 18px 20px; display: grid; gap: 12px; }
+.stagehead .eyebrow { font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.stagehead h2 { font-size: 24px; font-weight: 700; }
+.stagehead .note { color: var(--accent); font-weight: 500; font-size: 14px; }
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(96px, 1fr)); gap: 10px; }
+.stat { border-top: 2px solid var(--line); padding-top: 6px; }
+.stat .k { font-size: 11.5px; color: var(--muted); letter-spacing: 0.04em; }
+.stat .v { font-size: 18px; font-weight: 600; font-variant-numeric: tabular-nums; font-family: var(--display); }
+.stat .v.small { font-size: 14px; font-family: var(--body); }
+.dx { display: inline-flex; align-items: center; gap: 8px; padding: 6px 10px; border-radius: 4px; font-size: 14px; font-weight: 500; width: fit-content; max-width: 100%; }
+.dx.ok { background: color-mix(in srgb, var(--good) 14%, transparent); color: var(--good); }
+.dx.no { background: color-mix(in srgb, var(--bad) 14%, transparent); color: var(--bad); }
+.changes { margin: 0; padding-left: 18px; display: grid; gap: 4px; font-size: 14px; }
+.legend { display: flex; flex-wrap: wrap; gap: 8px 16px; font-size: 12.5px; color: var(--muted); margin: 18px 0 10px; }
+.legend span::before { content: ""; display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 6px; vertical-align: -1px; background: var(--doc); }
+.legend .lp::before { background: var(--pt); } .legend .le::before { background: var(--exam); border: 1px dashed var(--muted); }
+.legend .lw::before { background: var(--warm); } .legend .lc::before { background: var(--closing); border: 1px solid var(--closing-ink); }
+
+.chat { display: grid; gap: 10px; }
+.turn { display: grid; grid-template-columns: 34px minmax(0, 1fr); gap: 10px; align-items: start; }
+.turn .n { font-size: 11px; color: var(--muted); text-align: right; padding-top: 10px; font-variant-numeric: tabular-nums; }
+.pair { display: grid; gap: 6px; }
+.bubble { padding: 8px 12px; border-radius: 12px; max-width: 78%; width: fit-content; font-size: 14.5px; line-height: 1.5; overflow-wrap: anywhere; }
+.bubble.doc { background: var(--doc); color: var(--doc-ink); border-top-left-radius: 4px; }
+.bubble.pt { background: var(--pt); color: var(--pt-ink); justify-self: end; border-top-right-radius: 4px; }
+.bubble.exam { background: var(--exam); color: var(--fg); border: 1px dashed var(--muted); border-radius: 6px; font-size: 13.5px; }
+.bubble.exam .r { color: var(--muted); display: block; font-size: 12.5px; margin-top: 2px; }
+.turn.closing .bubble.doc { background: var(--closing); color: var(--closing-ink); }
+mark.ack { background: transparent; color: var(--warm); font-weight: 600; }
+.divider { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 12px; letter-spacing: 0.06em; margin: 8px 0 2px; }
+.divider::before, .divider::after { content: ""; flex: 1; border-top: 1px dashed var(--line); }
+.empty { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 18px 20px; color: var(--muted); font-size: 14px; margin-top: 18px; }
+.empty b { color: var(--fg); }
+
+@media (max-width: 820px) {
+  main { grid-template-columns: 1fr; gap: 16px; }
+  nav.timeline { position: static; max-height: none; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  nav.timeline ol { display: flex; gap: 6px; border-left: 0; padding: 0 0 8px; border-bottom: 2px solid var(--line); }
+  nav.timeline li::before { display: none; }
+  nav.timeline li { flex: 0 0 auto; }
+  nav.timeline button { padding: 6px 10px; }
+  .bubble { max-width: 92%; }
+}
+@media (prefers-reduced-motion: no-preference) { .bubble { transition: background .2s; } }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+<header class="top">
+  <div class="eyebrow" style="font-size:12px;letter-spacing:.08em;color:var(--muted)">N.O.V.A. 2026 · Doctor Agent · 공개 증례 __CASE__</div>
+  <h1>__TITLE__</h1>
+  <p>같은 환자(__WHO__, __COMPLAINT__)를 우리 에이전트가 버전마다 어떻게 진료했는지, 서버 실행 로그 그대로입니다. 정답은 <b>__ANSWER__</b>. 왼쪽에서 버전을 고르면 그때의 대화가 나옵니다.</p>
+  <div class="case"><span>이름 <b>__NAME__</b></span><span>환자 <b>__WHO__</b></span><span>활력징후 <b>__VITALS__</b></span><span>턴 한도 <b>50</b></span><span>발화 <b>≤30자, 한 항목</b></span></div>
+  <div class="chart">
+    <h2>공식 리더보드 점수(제출 순)</h2>
+    <p class="sub">같은 날 여러 번 제출한 날도 있어 가로축은 제출 순서입니다. 떨어진 두 점은 실험이 기각된 날입니다.</p>
+    <svg id="chart" viewBox="0 0 720 220" role="img" aria-label="공식 점수 추이"></svg>
+  </div>
+</header>
+
+<main>
+  <nav class="timeline" aria-label="버전"><ol id="tl"></ol></nav>
+  <section class="stage" id="stage"></section>
+</main>
+</div>
+
+<script>
+const STAGES = __STAGES__;
+const OFFICIAL = __OFFICIAL__;
+const TOP = __TOP__;
+const ACK = new RegExp(__ACK__);
+
+function esc(s){ return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function docText(s){
+  const m = s.match(ACK);
+  if (!m) return esc(s);
+  return '<mark class="ack">' + esc(m[1]) + '</mark> ' + esc(s.slice(m[0].length));
+}
+
+function drawChart(){
+  const svg = document.getElementById('chart');
+  const W = 720, H = 220, L = 44, R = 16, T = 18, B = 40;
+  const ys = OFFICIAL.map(o => o[2]);
+  const ymin = 58, ymax = 78;
+  const x = i => L + (W - L - R) * (OFFICIAL.length === 1 ? 0.5 : i / (OFFICIAL.length - 1));
+  const y = v => T + (H - T - B) * (1 - (v - ymin) / (ymax - ymin));
+  let out = '';
+  for (const g of [60, 65, 70, 75]) {
+    out += `<line x1="${L}" x2="${W-R}" y1="${y(g)}" y2="${y(g)}" stroke="var(--line)" stroke-width="1"/>`;
+    out += `<text x="${L-8}" y="${y(g)+4}" text-anchor="end">${g}</text>`;
+  }
+  out += `<line x1="${L}" x2="${W-R}" y1="${y(TOP)}" y2="${y(TOP)}" stroke="var(--warm)" stroke-dasharray="4 4" stroke-width="1.2"/>`;
+  out += `<text x="${W-R}" y="${y(TOP)-5}" text-anchor="end" style="fill:var(--warm)">1위 ${TOP}</text>`;
+  const pts = OFFICIAL.map((o,i) => `${x(i)},${y(o[2])}`).join(' ');
+  out += `<polyline points="${pts}" fill="none" stroke="var(--accent)" stroke-width="2.2" stroke-linejoin="round"/>`;
+  OFFICIAL.forEach((o,i) => {
+    const drop = i > 0 && o[2] < OFFICIAL[i-1][2] - 1.5;
+    out += `<circle cx="${x(i)}" cy="${y(o[2])}" r="4.5" fill="${drop ? 'var(--bad)' : 'var(--accent)'}" stroke="var(--panel)" stroke-width="2"/>`;
+    out += `<text class="pt-label" x="${x(i)}" y="${y(o[2]) + (drop ? 18 : -10)}" text-anchor="middle">${o[2].toFixed(1)}</text>`;
+    out += `<text x="${x(i)}" y="${H-22}" text-anchor="middle">${o[1]}</text>`;
+    out += `<text x="${x(i)}" y="${H-8}" text-anchor="middle">${o[0]}</text>`;
+  });
+  svg.innerHTML = out;
+}
+
+function renderTimeline(cur){
+  const ol = document.getElementById('tl');
+  ol.innerHTML = STAGES.map((s,i) => `<li class="${i===cur?'on':''} ${s.correct===false?'wrong':s.correct===null?'none':''}">
+    <button type="button" data-i="${i}" aria-current="${i===cur}">
+      <div class="l">${esc(s.label)}</div>
+      <div class="d"><span>${esc(s.date)}</span>${s.official?`<span class="s">${esc(s.official)}</span>`:''}${s.turns?`<span class="s">${s.turns}턴</span>`:''}</div>
+    </button></li>`).join('');
+  ol.querySelectorAll('button').forEach(b => b.addEventListener('click', () => show(+b.dataset.i)));
+}
+
+function stat(k, v, small){ return `<div class="stat"><div class="k">${k}</div><div class="v ${small?'small':''}">${v}</div></div>`; }
+
+function show(i){
+  const s = STAGES[i];
+  renderTimeline(i);
+  const el = document.getElementById('stage');
+  let head = `<div class="stagehead">
+    <div class="eyebrow">${esc(s.date)} · ${esc(s.v)}</div>
+    <h2>${esc(s.label)}</h2>
+    <div class="note">${esc(s.note)}</div>
+    ${s.dx?`<div class="dx ${s.correct?'ok':'no'}">${s.correct?'정답':'오진'} · 주진단 "${esc(s.dx)}"</div>`:''}
+    <div class="stats">
+      ${stat('턴', s.turns ?? '—')}${stat('질문', s.events.length ? s.questions : '—')}${stat('진찰', s.events.length ? s.exams : '—')}${stat('설명 줄', s.events.length ? s.closing : '—')}${stat('Doctor 호출', s.calls ?? '—')}${stat('공식 점수', s.official || '미제출', true)}${s.rank?stat('순위', s.rank, true):''}
+    </div>
+    <ul class="changes">${s.changes.map(c => `<li>${esc(c)}</li>`).join('')}</ul>
+    ${s.summary?`<div style="font-size:13px;color:var(--muted)">6축: ${esc(s.summary)}</div>`:''}
+  </div>`;
+  if (!s.events.length) {
+    el.innerHTML = head + `<div class="empty"><b>대화 기록 없음.</b> __BASELINE_NOTE__</div>`;
+    window.scrollTo({top: el.offsetTop - 8, behavior: 'smooth'});
+    return;
+  }
+  const legend = `<div class="legend"><span>의사</span><span class="lp">환자</span><span class="le">진찰</span><span class="lw">인사·공감·수용 표현</span><span class="lc">마무리 설명</span></div>`;
+  let rows = '';
+  s.events.forEach((e, idx) => {
+    const closing = idx >= s.closing_start;
+    if (idx === s.closing_start) rows += `<div class="divider">마무리 설명 · ${s.closing}턴</div>`;
+    if (idx > 0 && e.k === 'EXAM' && s.events[idx-1].k !== 'EXAM') rows += `<div class="divider">진찰</div>`;
+    if (e.k === 'EXAM') {
+      rows += `<div class="turn"><div class="n">${e.t}</div><div class="pair"><div class="bubble exam">${esc(e.s)}<span class="r">${esc(e.r)}</span></div></div></div>`;
+    } else {
+      rows += `<div class="turn ${closing?'closing':''}"><div class="n">${e.t}</div><div class="pair"><div class="bubble doc">${docText(e.s)}</div>${e.r?`<div class="bubble pt">${esc(e.r)}</div>`:''}</div></div>`;
+    }
+  });
+  el.innerHTML = head + legend + `<div class="chat">${rows}</div>`;
+  if (window.innerWidth <= 820) window.scrollTo({top: el.offsetTop - 8, behavior: 'smooth'});
+}
+
+drawChart();
+let start = STAGES.length - 1;
+try { const h = location.hash.replace('#',''); const k = STAGES.findIndex(s => s.v === h); if (k >= 0) start = k; } catch (e) {}
+show(start);
+</script>
+
+</body>
+</html>
