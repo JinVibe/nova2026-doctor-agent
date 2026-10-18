@@ -13,7 +13,7 @@ from nova_sdk import NovaError
 
 from . import config
 from .guidelines import library
-from .knowledge import (CORE_EXAMS, EXAMS, ICE_HISTORY, MED_FOLLOWUPS, MED_FOLLOWUPS_V3, MED_NEGATIVE, MED_RISK_FOLLOWUPS, MED_RISK_WORDS,
+from .knowledge import (CORE_EXAMS, EXAMS, ICE_HISTORY, OPEN_PROBES, MED_FOLLOWUPS, MED_FOLLOWUPS_V3, MED_NEGATIVE, MED_RISK_FOLLOWUPS, MED_RISK_WORDS,
                         exam_menu, history_items, is_child)
 from .llm import STOP_CODES, Doctor, with_retry
 from .prompts import (ANSWER_PROMPT, ANSWER_PROMPT_V2, CHALLENGER_PROMPT, CLOSING_PROMPT, CLOSING_PROMPT_V2, CLOSING_PROMPT_V3, CLOSING_PROMPT_V4, CLOSING_PROMPT_V5,
@@ -150,9 +150,12 @@ class Consult:
         self.visit.ddx = plan.get('ddx') or []
         if config.THREAD:
             plan['questions'] = (plan.get('questions') or [])[:6 if TURN_BUDGET <= 40 else 7]  # 선별 질문이 공통 문진·재계획 턴을 먹지 않게
-        if config.ICE_V2:
-            plan['questions'] = (plan.get('questions') or [])[:10]  # 모델이 우선순위로 적은 목록의 꼬리만 양보(11이면 재계획 질문 자리가 0이 됨)
+        if config.ICE_V2 or config.OPEN_PROBE:
+            cap = (10 if config.ICE_V2 else 12) - config.OPEN_PROBE
+            plan['questions'] = (plan.get('questions') or [])[:cap]  # 모델이 우선순위로 적은 목록의 꼬리만 양보(11이면 재계획 질문 자리가 0이 됨)
         self.enqueue({'questions': plan.get('questions')})
+        if config.OPEN_PROBE:
+            self.queue += [('CORE', item) for item in OPEN_PROBES[:config.OPEN_PROBE]]
         if config.EARLY_REPLAN:
             self.queue.append(('REPLAN', None))  # 계획 질문의 답(단서)을 보고 바로 뒤쫓는 질문을 앞에 끼움
         if config.ICE_V2:
@@ -224,6 +227,10 @@ class Consult:
                 topic, question, keywords = item
                 # v1.6 문구는 단일 항목이라 차단 없이 보냄. v1.2 문구는 v1.2와 똑같이 차단을 거침(복합 문구 4개는 보내지지 않음)
                 ok = True if covered(self.visit, keywords) else self.say(question, check_compound=not (config.HISTORY_V2 or config.CORE_FIX))
+                if topic.startswith('open') and ok:
+                    last = self.visit.events[-1] if self.visit.events else {}
+                    if last.get('kind') == 'SAY' and any(n in (last.get('reply') or '') for n in ('없어요', '없습니다', '그게 다', '아니요', '아뇨')):
+                        self.queue = [(k, it) for k, it in self.queue if not (k == 'CORE' and it[0].startswith('open'))]  # "없어요"면 나머지 열린 질문은 버림
                 if topic == 'meds' and ok and self.took_medication():
                     # 약이 있다고 하면 이름·용량·횟수·기간을 하나씩 바로 묻는다(복합 질문은 환자가 거절함)
                     followups = list(MED_FOLLOWUPS_V3 if (config.THREAD or config.MEDCORE) else MED_FOLLOWUPS)
