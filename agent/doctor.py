@@ -32,6 +32,11 @@ REFUSALS = {'EXAM_NOT_SPECIFIC', 'EXAM_NOT_RECOGNIZED', 'CONTENT_TOO_LONG', 'EMP
 MAX_EXAMS = (5 if config.TURN_BUDGET and config.TURN_BUDGET <= 34 else 6 if config.TURN_BUDGET and config.TURN_BUDGET <= 40 else 7) if config.EXAM_TRIM else 99   # 공통 3 + 계획 ≤4(짧은 진료는 ≤3)
 
 
+SYMPTOM_NAMES = ('저신장', '불면', '불면증', '체중 감소', '체중감소', '두통', '복통', '발열', '어지럼', '어지러움', '피로', '기침', '설사', '구토', '부종', '호흡곤란', '흉통')
+WORRY_WORDS = ('걱정', '불안', '무서', '두려', '힘들어', '힘드', '겁이')
+WORRY_ACK = '걱정되시죠. '
+
+
 def valid_question(text):
     text = nfc(text)
     return 0 < len(text) <= MAX_CHARS and text.count('?') <= 1
@@ -100,6 +105,11 @@ class Consult:
             return True
         if not self.visit.asked and len(EMPATHY + text) <= MAX_CHARS:
             text = EMPATHY + text
+        elif config.TALK_V3 and text.endswith('?'):
+            last = self.visit.events[-1] if self.visit.events else {}
+            reply = last.get('reply') or ''
+            if last.get('kind') == 'SAY' and any(w in reply for w in WORRY_WORDS) and len(WORRY_ACK + text) <= MAX_CHARS:
+                text = WORRY_ACK + text
         elif config.ACK and text.endswith('?'):
             last = self.visit.events[-1] if self.visit.events else {}
             if last.get('kind') == 'SAY' and last.get('reply'):
@@ -256,7 +266,14 @@ class Consult:
         if isinstance(result.get('ddx'), list) and result['ddx']:
             self.visit.ddx = result['ddx']
         self.keywords = [k for k in result.get('keywords') or [] if isinstance(k, str)][:6]
-        return nfc(result.get('diagnosis')) or top
+        diagnosis = nfc(result.get('diagnosis')) or top
+        if diagnosis.strip() in SYMPTOM_NAMES:  # 증상명이 주진단으로 나오면(C03 "저신장") 감별진단에서 첫 원인 진단으로 바꾼다
+            cause = next((nfc(d['dx']) for d in self.visit.ddx if isinstance(d, dict) and d.get('dx')
+                          and nfc(d['dx']).strip() not in SYMPTOM_NAMES), '')
+            if cause:
+                print(f'[agent] diagnosis {diagnosis!r} is a symptom name -> {cause!r}', file=sys.stderr)
+                diagnosis = cause
+        return diagnosis
 
     def consult_guidelines(self, diagnosis):
         """지침 코퍼스에서 주진단 관련 검사·치료·추적 절을 찾아 기록 작성에 넘긴다(없으면 빈 문자열)."""
@@ -286,6 +303,8 @@ class Consult:
         if not lines and diagnosis:
             lines = [l for l in (f'{diagnosis} 가능성이 높아 보여요.', '정확히 보려고 몇 가지 검사를 할게요.',
                                  '증상이 심해지면 바로 병원에 오세요.', '1~2주 뒤에 다시 뵐게요.') if len(l) <= MAX_CHARS]
+        if config.TALK_V3:
+            return self.speak_and_answer(lines, diagnosis)
         said = self.speak(lines)
         for _ in range(ANSWER_TURNS):  # 환자가 되물으면 짧게 답한다
             last = self.visit.events[-1] if self.visit.events else {}
@@ -310,13 +329,28 @@ class Consult:
                 out.append(short)
         return out
 
-    def answer(self, diagnosis):
+    def speak_and_answer(self, lines, diagnosis):
+        """마무리 설명을 한 줄씩 말하되, 환자가 되물으면 그 자리에서 바로 답한다(최대 ANSWER_TURNS회)."""
+        said, used = [], 0  # used = 되묻기에 쓴 턴 수(합계 ANSWER_TURNS 안에서, 중간 되묻기는 한 줄로)
+        for i, line in enumerate(lines):
+            got = self.speak([line])
+            if not got and (self.visit.turns_left <= 0 or self.visit.seconds_left() < 90):
+                break
+            said += got
+            last = self.visit.events[-1] if self.visit.events else {}
+            if got and used < ANSWER_TURNS and last.get('kind') == 'SAY' and '?' in (last.get('reply') or ''):
+                got = self.answer(diagnosis, max_lines=1 if i < len(lines) - 1 else ANSWER_TURNS - used)
+                said += got
+                used += max(1, len(got))
+        return said
+
+    def answer(self, diagnosis, max_lines=2):
         """환자의 되물음에 1~2문장으로 답한다(v2). 답이 없거나 길면 기본 답."""
         user = self.visit.situation() + f'\n\n주진단: {diagnosis}'
         if config.TALK_V2 or config.CLOSING_V3 or config.CLOSING_V4:
             result = self.doctor.ask_json(ANSWER_PROMPT_V2, user, max_tokens=3000,
                                           check=lambda v: isinstance(v.get('lines'), list) and any(valid_question(l) for l in v['lines'])) or {}
-            lines = [nfc(l) for l in result.get('lines') or [] if valid_question(l)][:2]
+            lines = [nfc(l) for l in result.get('lines') or [] if valid_question(l)][:max_lines]
         else:
             result = self.doctor.ask_json(ANSWER_PROMPT, user, max_tokens=3000, check=lambda v: valid_question(v.get('line'))) or {}
             lines = [nfc(result.get('line'))] if result.get('line') else []
