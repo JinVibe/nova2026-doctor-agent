@@ -10,6 +10,8 @@ import uuid
 
 from nova_sdk import NovaError
 
+from . import config
+
 # 모델·네트워크 일시 오류 — 턴을 쓰지 않으므로 잠시 뒤 다시 보낸다.
 RETRY_CODES = {'PROVIDER_UNAVAILABLE', 'PROVIDER_RESPONSE_INVALID', 'PATIENT_RESPONSE_INVALID',
                'EXAMINER_RESPONSE_INVALID', 'API_UNAVAILABLE', 'REQUEST_PENDING', 'LOCAL_GATEWAY_UNAVAILABLE',
@@ -54,9 +56,9 @@ def parse_json(text):
 
 
 class Doctor:
-    def __init__(self, client, effort='medium'):
+    def __init__(self, client, effort=None):
         self.client = client
-        self.effort = effort
+        self.effort = effort or config.DOCTOR_EFFORT
         self.calls = 0
         self.failures = 0
         self.usage = {}  # 서버 usage 필드 누적(prompt_tokens·completion_tokens…). 효율 점수의 절반이 Doctor 비용(10/16 운영진 메일)
