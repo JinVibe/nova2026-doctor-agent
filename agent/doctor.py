@@ -16,20 +16,20 @@ from .guidelines import library
 from .knowledge import (CORE_EXAMS, EXAMS, ICE_HISTORY, MED_FOLLOWUPS, MED_FOLLOWUPS_V3, MED_NEGATIVE, MED_RISK_FOLLOWUPS, MED_RISK_WORDS,
                         exam_menu, history_items, is_child)
 from .llm import STOP_CODES, Doctor, with_retry
-from .prompts import (ANSWER_PROMPT, ANSWER_PROMPT_V2, CHALLENGER_PROMPT, CLOSING_PROMPT, CLOSING_PROMPT_V2, CLOSING_PROMPT_V3, CLOSING_PROMPT_V4,
+from .prompts import (ANSWER_PROMPT, ANSWER_PROMPT_V2, CHALLENGER_PROMPT, CLOSING_PROMPT, CLOSING_PROMPT_V2, CLOSING_PROMPT_V3, CLOSING_PROMPT_V4, CLOSING_PROMPT_V5,
                       COVERAGE_RULE, DX_RULES, MED_RULES, PLAN_DEDUP_RULE, PLAN_PROMPT, PLAN_QRULE_V1, PLAN_QRULE_V2,
                       PLAN_QRULE_V3, QUESTION_RULES, REASSESS_PROMPT, REASSESS_PROMPT_V1, REPEAT_RULES, REPLAN_PROMPT, SHORTEN_PROMPT, THREAD_RULE)
 from .record import write_record
 from .visit import MAX_CHARS, Visit, nfc
 
 TURN_BUDGET = int(os.getenv('NOVA_TURN_BUDGET', config.TURN_BUDGET or (50 if config.CLOSING_V3 else 48)))  # 마무리 설명 포함 상한
-CLOSING_TURNS = 7 if config.CLOSING_V4 else 10 if config.CLOSING_V3 else 8
-ANSWER_TURNS = 2    # 마무리 설명 뒤 환자 질문에 답하는 턴
+CLOSING_TURNS = 6 if config.CLOSING_V5 else 7 if config.CLOSING_V4 else 10 if config.CLOSING_V3 else 8
+ANSWER_TURNS = 1 if config.TURN_BUDGET and config.TURN_BUDGET <= 32 else 2    # 마무리 설명 뒤 환자 질문에 답하는 턴
 MAX_REPLANS = 4 if config.EARLY_REPLAN else 3
 TIME_MARGIN = 240   # 마감 4분 전부터 마무리·기록으로
 EMPATHY = '많이 불편하셨겠어요. '
 REFUSALS = {'EXAM_NOT_SPECIFIC', 'EXAM_NOT_RECOGNIZED', 'CONTENT_TOO_LONG', 'EMPTY_CONTENT'}
-MAX_EXAMS = (5 if config.TURN_BUDGET and config.TURN_BUDGET <= 34 else 6 if config.TURN_BUDGET and config.TURN_BUDGET <= 40 else 7) if config.EXAM_TRIM else 99   # 공통 3 + 계획 ≤4(짧은 진료는 ≤3)
+MAX_EXAMS = (4 if config.TURN_BUDGET and config.TURN_BUDGET <= 32 else 5 if config.TURN_BUDGET and config.TURN_BUDGET <= 34 else 6 if config.TURN_BUDGET and config.TURN_BUDGET <= 40 else 7) if config.EXAM_TRIM else 99   # 공통 3 + 계획 ≤4(짧은 진료는 ≤3)
 
 
 SYMPTOM_NAMES = ('저신장', '불면', '불면증', '체중 감소', '체중감소', '두통', '복통', '발열', '어지럼', '어지러움', '피로', '기침', '설사', '구토', '부종', '호흡곤란', '흉통')
@@ -155,6 +155,8 @@ class Consult:
         self.queue += [('CORE', item) for item in history_items(self.visit.opening)]
         self.queue.append(('REPLAN', None))  # 병력 답(약 용량 등)을 보고 진찰 전에 한 번 보완
         core = CORE_EXAMS + (['MENTAL', 'ABD_PALP'] if config.CORE_EXAMS_FULL else ['ABD_PALP'] if config.CORE_ABD else [])
+        if MAX_EXAMS <= 4:
+            core = CORE_EXAMS[:1]  # 30턴: 외관만 공통, 나머지 3개는 감별을 가르는 계획 진찰(C10 안징후·C03 성장속도가 심음·폐에 밀렸음)
         self.enqueue({'exams': core + list(plan.get('exams') or [])}, max_exams=(3 + 4) if config.EXAM_TRIM else None)
 
     def replan(self, front=False):
@@ -289,15 +291,15 @@ class Consult:
             return ''
 
     def closing(self, diagnosis):
-        prompt = CLOSING_PROMPT_V4 if config.CLOSING_V4 else CLOSING_PROMPT_V3 if config.CLOSING_V3 else CLOSING_PROMPT_V2 if config.TALK_V2 else CLOSING_PROMPT
+        prompt = CLOSING_PROMPT_V5 if config.CLOSING_V5 else CLOSING_PROMPT_V4 if config.CLOSING_V4 else CLOSING_PROMPT_V3 if config.CLOSING_V3 else CLOSING_PROMPT_V2 if config.TALK_V2 else CLOSING_PROMPT
         result = self.doctor.ask_json(prompt, self.visit.situation()
                                       + f'\n\n감별진단: {self.visit.ddx_text()}\n주진단: {diagnosis}',
                                       max_tokens=4000, check=lambda v: isinstance(v.get('lines'), list)) or {}
         raw = [nfc(l) for l in result.get('lines') or [] if isinstance(l, str) and l.strip()]
         lines = [l for l in raw if valid_question(l)]
-        if config.CLOSING_V4 and len(lines) < len(raw):
+        if (config.CLOSING_V4 or config.CLOSING_V5) and len(lines) < len(raw):
             lines = self.shorten(raw)  # 30자를 넘어 빠질 줄(응급 경고·추적 시점)을 줄여서 살린다(C03에서 7줄 중 3줄이 빠짐)
-        if (config.CLOSING_V3 or config.CLOSING_V4) and lines and not any(k in l for l in lines for k in ('뒤', '후에', '다시 오', '뵙', '재진', '내일', '오늘', '마다')):
+        if (config.CLOSING_V3 or config.CLOSING_V4 or config.CLOSING_V5) and lines and not any(k in l for l in lines for k in ('뒤', '후에', '다시 오', '뵙', '재진', '내일', '오늘', '마다', '다음 주', '매주', '매달')):
             # 결과 확인 시점 줄이 30자를 넘어 빠진 경우(C03에서 발생) 기본 문구를 마지막 질문 줄 앞에 넣는다
             lines.insert(len(lines) - 1 if lines[-1].endswith('?') else len(lines), '1~2주 뒤 검사 결과 보러 다시 오세요.')
         if not lines and diagnosis:
@@ -347,14 +349,14 @@ class Consult:
     def answer(self, diagnosis, max_lines=2):
         """환자의 되물음에 1~2문장으로 답한다(v2). 답이 없거나 길면 기본 답."""
         user = self.visit.situation() + f'\n\n주진단: {diagnosis}'
-        if config.TALK_V2 or config.CLOSING_V3 or config.CLOSING_V4:
+        if config.TALK_V2 or config.CLOSING_V3 or config.CLOSING_V4 or config.CLOSING_V5:
             result = self.doctor.ask_json(ANSWER_PROMPT_V2, user, max_tokens=3000,
                                           check=lambda v: isinstance(v.get('lines'), list) and any(valid_question(l) for l in v['lines'])) or {}
             lines = [nfc(l) for l in result.get('lines') or [] if valid_question(l)][:max_lines]
         else:
             result = self.doctor.ask_json(ANSWER_PROMPT, user, max_tokens=3000, check=lambda v: valid_question(v.get('line'))) or {}
             lines = [nfc(result.get('line'))] if result.get('line') else []
-        fallback = '지금 말씀드린 계획대로 하면 좋아질 수 있어요.' if config.CLOSING_V3 or config.CLOSING_V4 else '검사 결과를 보고 자세히 설명드릴게요.'
+        fallback = '지금 말씀드린 계획대로 하면 좋아질 수 있어요.' if config.CLOSING_V3 or config.CLOSING_V4 or config.CLOSING_V5 else '검사 결과를 보고 자세히 설명드릴게요.'
         return self.speak(lines or [fallback])
 
     def speak(self, lines):
