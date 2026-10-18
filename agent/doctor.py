@@ -66,6 +66,7 @@ class Consult:
         self.references = ''  # 기록에 넣은 지침 발췌
         self.rejected = []    # 복합 질문이라 보내지 않은 질문(다음 재계획에 알려 하나씩 나눠 쓰게 함)
         self.summarized = False  # 진찰 전 요약 확인을 한 번만(COVERAGE_PLAN)
+        self.worry_acked = False  # 걱정 반응 접두는 한 번만(TALK_V3)
         self.log_dir = os.getenv('NOVA_OUTPUT_DIR')  # 로컬 로그 위치(서버에선 미설정)
 
     # ---------- 행동 ----------
@@ -108,7 +109,9 @@ class Consult:
         elif config.TALK_V3 and text.endswith('?'):
             last = self.visit.events[-1] if self.visit.events else {}
             reply = last.get('reply') or ''
-            if last.get('kind') == 'SAY' and any(w in reply for w in WORRY_WORDS) and len(WORRY_ACK + text) <= MAX_CHARS:
+            if (last.get('kind') == 'SAY' and any(w in reply for w in WORRY_WORDS) and len(WORRY_ACK + text) <= MAX_CHARS
+                    and not self.worry_acked):
+                self.worry_acked = True  # 한 진료에 한 번만(연속 "걱정되시죠"는 기계적으로 보임)
                 text = WORRY_ACK + text
         elif config.ACK and text.endswith('?'):
             last = self.visit.events[-1] if self.visit.events else {}
@@ -147,9 +150,13 @@ class Consult:
         self.visit.ddx = plan.get('ddx') or []
         if config.THREAD:
             plan['questions'] = (plan.get('questions') or [])[:6 if TURN_BUDGET <= 40 else 7]  # 선별 질문이 공통 문진·재계획 턴을 먹지 않게
+        if config.ICE_V2:
+            plan['questions'] = (plan.get('questions') or [])[:10]  # 모델이 우선순위로 적은 목록의 꼬리만 양보(11이면 재계획 질문 자리가 0이 됨)
         self.enqueue({'questions': plan.get('questions')})
         if config.EARLY_REPLAN:
             self.queue.append(('REPLAN', None))  # 계획 질문의 답(단서)을 보고 바로 뒤쫓는 질문을 앞에 끼움
+        if config.ICE_V2:
+            self.queue += [('CORE', item) for item in ICE_HISTORY[:2]]  # 일상 지장·가장 걱정되는 점(정보 범주 2개를 코드가 보장)
         if config.ICE:
             self.queue += [('CORE', item) for item in ICE_HISTORY]  # 환자 관점·기능 영향(공통 문진처럼 코드가 보장)
         self.queue += [('CORE', item) for item in history_items(self.visit.opening)]
