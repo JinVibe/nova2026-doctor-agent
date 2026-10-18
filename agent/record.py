@@ -9,7 +9,7 @@ import re
 from nova_sdk import RECORD_FIELDS, empty_record
 
 from . import config
-from .prompts import RECORD_PROMPT, VERIFY_AP_PROMPT, VERIFY_PROMPT
+from .prompts import PLAN_RULES_V2, RECORD_PROMPT, VERIFY_AP_PROMPT, VERIFY_PROMPT
 
 VERIFY = config.VERIFY_S and os.getenv('NOVA_VERIFY_S', '1') != '0'  # S 항목 사실 검증(Doctor 호출 1회 추가)
 VERIFY_AP = config.VERIFY_AP and os.getenv('NOVA_VERIFY_AP', '1') != '0'  # A·P 검증(Doctor 호출 1회 추가)
@@ -72,7 +72,8 @@ def verify_assessment_plan(doctor, visit, note, closing_lines):
 
 FOLLOWUP_V2 = '검사 결과 확인 시점(예: 1~2주 후)과 치료 시작 후 재평가 간격(예: 4~6주마다 검사, 3~6개월마다 측정)을 각각, 재평가 항목, 전문과 의뢰 기준, 바로 응급실에 와야 하는 구체적 경고 증상'
 FOLLOWUP_V1 = '구체적 재진 시점(예: 1주 후)과 재평가 항목, 바로 응급실에 와야 하는 구체적 경고 증상'
-RECORD_PROMPT_USED = RECORD_PROMPT if config.HISTORY_V2 else RECORD_PROMPT.replace(FOLLOWUP_V2, FOLLOWUP_V1)
+RECORD_PROMPT_USED = (RECORD_PROMPT if config.HISTORY_V2 else RECORD_PROMPT.replace(FOLLOWUP_V2, FOLLOWUP_V1)).replace(
+    '{plan_rules}', PLAN_RULES_V2 if config.PLAN_V2 else '')
 
 
 def write_record(doctor, visit, closing_lines, diagnosis, references=''):
