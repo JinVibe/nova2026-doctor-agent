@@ -16,14 +16,14 @@ from .guidelines import library
 from .knowledge import (CORE_EXAMS, EXAMS, ICE_HISTORY, OPEN_PROBES, MED_FOLLOWUPS, MED_FOLLOWUPS_V3, MED_NEGATIVE, MED_RISK_FOLLOWUPS, MED_RISK_WORDS,
                         exam_menu, history_items, is_child)
 from .llm import STOP_CODES, Doctor, with_retry
-from .prompts import (ANSWER_PROMPT, ANSWER_PROMPT_V2, CHALLENGER_PROMPT, CLOSING_PROMPT, CLOSING_PROMPT_V2, CLOSING_PROMPT_V3, CLOSING_PROMPT_V4, CLOSING_PROMPT_V5,
+from .prompts import (ANSWER_PROMPT, ANSWER_PROMPT_V2, CHALLENGER_PROMPT, CLOSING_PROMPT, CLOSING_PROMPT_V2, CLOSING_PROMPT_V3, CLOSING_PROMPT_V6, CLOSING_PROMPT_V4, CLOSING_PROMPT_V5,
                       COVERAGE_RULE, DX_RULES, MED_RULES, PLAN_DEDUP_RULE, PLAN_PROMPT, PLAN_QRULE_V1, PLAN_QRULE_V2,
                       PLAN_FEATURES_FIELD, PLAN_FEATURES_RULE, PLAN_QRULE_V3, PLAN_QRULE_V4, QUESTION_RULES, REASSESS_PROMPT, REASSESS_PROMPT_V1, REPEAT_RULES, REPLAN_PROMPT, SHORTEN_PROMPT, THREAD_RULE)
 from .record import write_record
 from .visit import MAX_CHARS, Visit, nfc
 
 TURN_BUDGET = int(os.getenv('NOVA_TURN_BUDGET', config.TURN_BUDGET or (50 if config.CLOSING_V3 else 48)))  # 마무리 설명 포함 상한
-CLOSING_TURNS = 6 if config.CLOSING_V5 else 7 if config.CLOSING_V4 else 10 if config.CLOSING_V3 else 8
+CLOSING_TURNS = 6 if (config.CLOSING_V5 or config.WARM) else 7 if config.CLOSING_V4 else 10 if config.CLOSING_V3 else 8
 ANSWER_TURNS = 1 if config.TURN_BUDGET and config.TURN_BUDGET <= 32 else 2    # 마무리 설명 뒤 환자 질문에 답하는 턴
 MAX_REPLANS = 4 if config.EARLY_REPLAN else 3
 TIME_MARGIN = 240   # 마감 4분 전부터 마무리·기록으로
@@ -106,17 +106,17 @@ class Consult:
             return True
         if not self.visit.asked and len(EMPATHY + text) <= MAX_CHARS:
             text = EMPATHY + text
-        elif config.TALK_V3 and text.endswith('?'):
+        elif text.endswith('?'):
             last = self.visit.events[-1] if self.visit.events else {}
             reply = last.get('reply') or ''
-            if (last.get('kind') == 'SAY' and any(w in reply for w in WORRY_WORDS) and len(WORRY_ACK + text) <= MAX_CHARS
-                    and not self.worry_acked):
+            acked = False
+            if config.TALK_V3 and last.get('kind') == 'SAY' and any(w in reply for w in WORRY_WORDS) and len(WORRY_ACK + text) <= MAX_CHARS \
+                    and not self.worry_acked:
                 self.worry_acked = True  # 한 진료에 한 번만(연속 "걱정되시죠"는 기계적으로 보임)
                 text = WORRY_ACK + text
-        elif config.ACK and text.endswith('?'):
-            last = self.visit.events[-1] if self.visit.events else {}
-            if last.get('kind') == 'SAY' and last.get('reply'):
-                ack = '네. ' if any(n in last['reply'] for n in ('아니요', '아뇨', '없어요', '없습니다')) else ('그렇군요. ', '네, 알겠습니다. ')[len(self.visit.asked) % 2]
+                acked = True
+            if config.ACK and not acked and last.get('kind') == 'SAY' and reply:  # v2.4j: TALK_V3와 함께 쓸 수 있게(전에는 elif라 ACK가 죽어 있었음)
+                ack = (('네. ', '알겠습니다. ') if any(n in reply for n in ('아니요', '아뇨', '없어요', '없습니다')) else ('그렇군요. ', '네, 알겠습니다. '))[len(self.visit.asked) % 2]  # 부정 답에도 두 가지를 번갈아(4j C03에서 "네." 6연속)
                 if len(ack + text) <= MAX_CHARS:
                     text = ack + text
         self.visit.asked.add(nfc(text))
@@ -310,13 +310,13 @@ class Consult:
             return ''
 
     def closing(self, diagnosis):
-        prompt = CLOSING_PROMPT_V5 if config.CLOSING_V5 else CLOSING_PROMPT_V4 if config.CLOSING_V4 else CLOSING_PROMPT_V3 if config.CLOSING_V3 else CLOSING_PROMPT_V2 if config.TALK_V2 else CLOSING_PROMPT
+        prompt = CLOSING_PROMPT_V6 if config.WARM else CLOSING_PROMPT_V5 if config.CLOSING_V5 else CLOSING_PROMPT_V4 if config.CLOSING_V4 else CLOSING_PROMPT_V3 if config.CLOSING_V3 else CLOSING_PROMPT_V2 if config.TALK_V2 else CLOSING_PROMPT
         result = self.doctor.ask_json(prompt, self.visit.situation()
                                       + f'\n\n감별진단: {self.visit.ddx_text()}\n주진단: {diagnosis}',
                                       max_tokens=4000, check=lambda v: isinstance(v.get('lines'), list)) or {}
         raw = [nfc(l) for l in result.get('lines') or [] if isinstance(l, str) and l.strip()]
         lines = [l for l in raw if valid_question(l)]
-        if (config.CLOSING_V4 or config.CLOSING_V5) and len(lines) < len(raw):
+        if (config.CLOSING_V4 or config.CLOSING_V5 or config.WARM) and len(lines) < len(raw):
             lines = self.shorten(raw)  # 30자를 넘어 빠질 줄(응급 경고·추적 시점)을 줄여서 살린다(C03에서 7줄 중 3줄이 빠짐)
         if (config.CLOSING_V3 or config.CLOSING_V4 or config.CLOSING_V5) and lines and not any(k in l for l in lines for k in ('뒤', '후에', '다시 오', '뵙', '재진', '내일', '오늘', '마다', '다음 주', '매주', '매달')):
             # 결과 확인 시점 줄이 30자를 넘어 빠진 경우(C03에서 발생) 기본 문구를 마지막 질문 줄 앞에 넣는다
@@ -394,7 +394,22 @@ class Consult:
                 said.append(line)
         return said
 
+    def greet(self):
+        """첫 턴 인사(WARM): 이름(또는 보호자 호칭)을 부르고 공감 한 마디. 마무리의 공감 줄을 여기로 옮겨 턴 합계는 같다."""
+        opening = self.visit.opening
+        if is_child(opening):
+            who = '어머님' if any(w in opening for w in ('엄마', '어머니')) else '아버님' if any(w in opening for w in ('아빠', '아버지')) else '보호자님'
+            text = f'안녕하세요, {who}. 걱정 많으셨겠어요.'
+        else:
+            m = re.search(r'(?:저는|이름은)\s*([가-힣]{2,4})(?=이고|이라고|입니다|이다|예요|이에요|이며|,)', opening)
+            text = f'안녕하세요, {m.group(1)} 님. 많이 힘드셨겠어요.' if m else '안녕하세요. 많이 힘드셨겠어요.'
+        if valid_question(text):
+            self.visit.asked.add(nfc(text))  # say()의 첫 턴 공감 접두·복합 문장 차단(쉼표)을 거치지 않고 보낸다
+            self.act('SAY', text)
+
     def run(self):
+        if config.WARM:
+            self.greet()
         self.plan()
         self.gather()
         self.review = self.challenge()
