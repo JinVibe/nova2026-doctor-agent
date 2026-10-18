@@ -18,7 +18,7 @@ from .knowledge import (CORE_EXAMS, EXAMS, ICE_HISTORY, OPEN_PROBES, MED_FOLLOWU
 from .llm import STOP_CODES, Doctor, with_retry
 from .prompts import (ANSWER_PROMPT, ANSWER_PROMPT_V2, CHALLENGER_PROMPT, CLOSING_PROMPT, CLOSING_PROMPT_V2, CLOSING_PROMPT_V3, CLOSING_PROMPT_V4, CLOSING_PROMPT_V5,
                       COVERAGE_RULE, DX_RULES, MED_RULES, PLAN_DEDUP_RULE, PLAN_PROMPT, PLAN_QRULE_V1, PLAN_QRULE_V2,
-                      PLAN_QRULE_V3, QUESTION_RULES, REASSESS_PROMPT, REASSESS_PROMPT_V1, REPEAT_RULES, REPLAN_PROMPT, SHORTEN_PROMPT, THREAD_RULE)
+                      PLAN_FEATURES_FIELD, PLAN_FEATURES_RULE, PLAN_QRULE_V3, PLAN_QRULE_V4, QUESTION_RULES, REASSESS_PROMPT, REASSESS_PROMPT_V1, REPEAT_RULES, REPLAN_PROMPT, SHORTEN_PROMPT, THREAD_RULE)
 from .record import write_record
 from .visit import MAX_CHARS, Visit, nfc
 
@@ -140,10 +140,15 @@ class Consult:
 
     def plan(self):
         prompt = PLAN_PROMPT.format(dx=DX_RULES, rules=QUESTION_RULES, menu=exam_menu(),
-                                    qrule=PLAN_QRULE_V3 if config.THREAD else PLAN_QRULE_V2 if config.HISTORY_V2 else PLAN_QRULE_V1,
+                                    qrule=PLAN_QRULE_V4 if config.PLAN_Q_V4 else PLAN_QRULE_V3 if config.THREAD
+                                    else PLAN_QRULE_V2 if config.HISTORY_V2 else PLAN_QRULE_V1,
                                     dedup=PLAN_DEDUP_RULE if config.REPEAT_GUARD else '')
         if config.EXAM_TRIM:
             prompt = prompt.replace('진찰 ID 5~10개', '진찰 ID 3~4개(감별을 직접 가르는 것만)')
+        if config.PLAN_FEATURES:
+            prompt = prompt.replace(' "questions": ["환자에게 할 질문"]', ' ' + PLAN_FEATURES_FIELD + '"questions": ["환자에게 할 질문"]')
+            prompt = prompt.replace('- exams: 아래 목록에서', PLAN_FEATURES_RULE + '\n- exams: 아래 목록에서')
+            assert PLAN_FEATURES_FIELD in prompt and PLAN_FEATURES_RULE in prompt
         plan = self.doctor.ask_json(prompt,
                                     self.visit.situation(), max_tokens=6000,
                                     check=lambda v: isinstance(v.get('questions'), list)) or {}
