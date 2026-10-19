@@ -18,7 +18,7 @@ from .knowledge import (CORE_EXAMS, EXAMS, ICE_HISTORY, OPEN_PROBES, MED_FOLLOWU
 from .llm import STOP_CODES, Doctor, with_retry
 from .prompts import (ANSWER_PROMPT, ANSWER_PROMPT_V2, CHALLENGER_PROMPT, CLOSING_PROMPT, CLOSING_PROMPT_V2, CLOSING_PROMPT_V3, CLOSING_PROMPT_V4T, CLOSING_PROMPT_V6, CLOSING_PROMPT_V7, CLOSING_PROMPT_V4, CLOSING_PROMPT_V5,
                       COVERAGE_RULE, DX_RULES, MED_RULES, PLAN_DEDUP_RULE, PLAN_PROMPT, PLAN_QRULE_V1, PLAN_QRULE_V2,
-                      PLAN_FEATURES_FIELD, PLAN_FEATURES_RULE, PLAN_QRULE_V3, PLAN_QRULE_V4, QUESTION_RULES, REASSESS_PROMPT, REASSESS_PROMPT_V1, REPEAT_RULES, REPLAN_PROMPT, SHORTEN_PROMPT, THREAD_RULE)
+                      PLAN_FEATURES_FIELD, PLAN_FEATURES_RULE, PLAN_STRUCT_FIELDS, PLAN_STRUCT_RULE, PLAN_QRULE_V3, PLAN_QRULE_V4, QUESTION_RULES, REASSESS_PROMPT, REASSESS_PROMPT_V1, REPEAT_RULES, REPLAN_PROMPT, SHORTEN_PROMPT, THREAD_RULE)
 from .record import write_record
 from .visit import MAX_CHARS, Visit, nfc
 
@@ -87,6 +87,8 @@ class Consult:
             if exc.code in REFUSALS:  # 잘못 보낸 요청: 답은 없지만 1턴 사용
                 self.visit.record('REFUSED', content, exc.code)
                 self.resync()
+            else:
+                print(f'[agent] {kind} skipped: {exc.code}', file=sys.stderr)  # 조용히 건너뛰던 오류를 로그에 남김(로컬 시뮬레이터에서 sol 한도 초과를 못 봤음)
             return True  # 재시도까지 실패한 일시 오류 등: 이 항목만 건너뛴다
         reply_text = reply.get('content') if kind == 'SAY' else reply.get('result')
         self.visit.record(kind, content, nfc(reply_text), reply.get('turns_remaining'))
@@ -148,6 +150,10 @@ class Consult:
             prompt = prompt.replace('진찰 ID 5~10개', '진찰 ID 4~5개(감별진단마다 양성·음성을 가르는 표적 진찰: 피부·갑상선·눈·신경·정신상태·기립성 혈압·맥박·반사·떨림 등; 심음·외관은 따로 하므로 제외)')
         elif config.EXAM_TRIM:
             prompt = prompt.replace('진찰 ID 5~10개', '진찰 ID 3~4개(감별을 직접 가르는 것만)')
+        if config.PLAN_STRUCT:
+            prompt = prompt.replace(' "questions": ["환자에게 할 질문"],\n', ' ' + PLAN_STRUCT_FIELDS)
+            prompt = prompt.replace('- exams: 아래 목록에서', PLAN_STRUCT_RULE + '\n- exams: 아래 목록에서')
+            assert PLAN_STRUCT_FIELDS in prompt and PLAN_STRUCT_RULE in prompt
         if config.PLAN_FEATURES:
             prompt = prompt.replace(' "questions": ["환자에게 할 질문"]', ' ' + PLAN_FEATURES_FIELD + '"questions": ["환자에게 할 질문"]')
             prompt = prompt.replace('- exams: 아래 목록에서', PLAN_FEATURES_RULE + '\n- exams: 아래 목록에서')
@@ -156,6 +162,14 @@ class Consult:
                                     self.visit.situation(), max_tokens=6000,
                                     check=lambda v: isinstance(v.get('questions'), list)) or {}
         self.visit.ddx = plan.get('ddx') or []
+        if config.PLAN_STRUCT and not plan.get('questions'):
+            # OSCE 순서: 현병력 → 위험 신호 → 감별 변별 → 계통 음성 확인. 칸별 상한으로 구성을 보장하고 합계 10.
+            caps = (('hpi', 4), ('red_flags', 2), ('discriminators', 2), ('ros', 3))
+            qs = []
+            for key, cap in caps:
+                qs += [q for q in (plan.get(key) or []) if isinstance(q, str)][:cap]
+            plan['questions'] = qs[:10]
+            print(f"[agent] plan struct: " + ' '.join(f"{k}={len([q for q in (plan.get(k) or []) if isinstance(q, str)][:c])}" for k, c in caps), file=sys.stderr)
         if config.THREAD:
             plan['questions'] = (plan.get('questions') or [])[:6 if TURN_BUDGET <= 40 else 7]  # 선별 질문이 공통 문진·재계획 턴을 먹지 않게
         if config.ICE_V2 or config.OPEN_PROBE:
@@ -166,11 +180,13 @@ class Consult:
             self.queue += [('CORE', item) for item in OPEN_PROBES[:config.OPEN_PROBE]]
         if config.EARLY_REPLAN:
             self.queue.append(('REPLAN', None))  # 계획 질문의 답(단서)을 보고 바로 뒤쫓는 질문을 앞에 끼움
-        if config.ICE_V2:
+        if config.ICE_V2 and not config.PLAN_STRUCT:
             self.queue += [('CORE', item) for item in ICE_HISTORY[:2]]  # 일상 지장·가장 걱정되는 점(정보 범주 2개를 코드가 보장)
         if config.ICE:
             self.queue += [('CORE', item) for item in ICE_HISTORY]  # 환자 관점·기능 영향(공통 문진처럼 코드가 보장)
         self.queue += [('CORE', item) for item in history_items(self.visit.opening)]
+        if config.ICE_V2 and config.PLAN_STRUCT:
+            self.queue += [('CORE', item) for item in ICE_HISTORY[:2]]  # v2.5a: OSCE 순서대로 사회력 뒤에 ICE
         self.queue.append(('REPLAN', None))  # 병력 답(약 용량 등)을 보고 진찰 전에 한 번 보완
         core = CORE_EXAMS + (['MENTAL', 'ABD_PALP'] if config.CORE_EXAMS_FULL else ['ABD_PALP'] if config.CORE_ABD else [])
         if config.EXAM_RICH:
