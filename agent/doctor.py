@@ -222,7 +222,12 @@ class Consult:
         summary = nfc(update.get('summary') or '') if (config.COVERAGE_PLAN or config.SUMMARY_CONFIRM) else ''
         if summary and valid_question(summary) and not self.summarized:  # 요약문은 질문이 아니라 복합 검사를 거치지 않음
             self.summarized = True
-            self.queue.insert(0, ('SAY', summary))  # 진찰로 넘어가기 전 요약 확인(의사소통: 이해 확인)
+            if config.SUMMARY_CONFIRM:
+                # 큐 앞에 넣으면 진찰 턴 예약이 진찰을 먼저 빼내 끝까지 안 나감(10/19 로컬 L5d 0/5) → 재계획 직후 바로 말한다
+                print(f'[agent] summary confirm: {summary}', file=sys.stderr)
+                self.say(summary, check_compound=False)
+            else:
+                self.queue.insert(0, ('SAY', summary))  # 진찰로 넘어가기 전 요약 확인(의사소통: 이해 확인)
             added += 1
         return added > 0  # 추가할 것이 없으면(enough 포함) 마무리로
 
