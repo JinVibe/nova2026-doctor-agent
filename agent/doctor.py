@@ -16,7 +16,7 @@ from .guidelines import library
 from .knowledge import (CORE_EXAMS, EXAMS, ICE_HISTORY, OPEN_PROBES, MED_FOLLOWUPS, MED_FOLLOWUPS_V3, MED_NEGATIVE, MED_RISK_FOLLOWUPS, MED_RISK_WORDS,
                         exam_menu, history_items, is_child)
 from .llm import STOP_CODES, Doctor, with_retry
-from .prompts import (ANSWER_PROMPT, ANSWER_PROMPT_V2, CHALLENGER_PROMPT, CLOSING_PROMPT, CLOSING_PROMPT_V2, CLOSING_PROMPT_V3, CLOSING_PROMPT_V6, CLOSING_PROMPT_V4, CLOSING_PROMPT_V5,
+from .prompts import (ANSWER_PROMPT, ANSWER_PROMPT_V2, CHALLENGER_PROMPT, CLOSING_PROMPT, CLOSING_PROMPT_V2, CLOSING_PROMPT_V3, CLOSING_PROMPT_V6, CLOSING_PROMPT_V7, CLOSING_PROMPT_V4, CLOSING_PROMPT_V5,
                       COVERAGE_RULE, DX_RULES, MED_RULES, PLAN_DEDUP_RULE, PLAN_PROMPT, PLAN_QRULE_V1, PLAN_QRULE_V2,
                       PLAN_FEATURES_FIELD, PLAN_FEATURES_RULE, PLAN_QRULE_V3, PLAN_QRULE_V4, QUESTION_RULES, REASSESS_PROMPT, REASSESS_PROMPT_V1, REPEAT_RULES, REPLAN_PROMPT, SHORTEN_PROMPT, THREAD_RULE)
 from .record import write_record
@@ -310,7 +310,7 @@ class Consult:
             return ''
 
     def closing(self, diagnosis):
-        prompt = CLOSING_PROMPT_V6 if config.WARM else CLOSING_PROMPT_V5 if config.CLOSING_V5 else CLOSING_PROMPT_V4 if config.CLOSING_V4 else CLOSING_PROMPT_V3 if config.CLOSING_V3 else CLOSING_PROMPT_V2 if config.TALK_V2 else CLOSING_PROMPT
+        prompt = CLOSING_PROMPT_V7 if (config.WARM and config.TESTS_SAY) else CLOSING_PROMPT_V6 if config.WARM else CLOSING_PROMPT_V5 if config.CLOSING_V5 else CLOSING_PROMPT_V4 if config.CLOSING_V4 else CLOSING_PROMPT_V3 if config.CLOSING_V3 else CLOSING_PROMPT_V2 if config.TALK_V2 else CLOSING_PROMPT
         result = self.doctor.ask_json(prompt, self.visit.situation()
                                       + f'\n\n감별진단: {self.visit.ddx_text()}\n주진단: {diagnosis}',
                                       max_tokens=4000, check=lambda v: isinstance(v.get('lines'), list)) or {}
