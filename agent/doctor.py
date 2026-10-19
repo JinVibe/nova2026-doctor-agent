@@ -18,7 +18,7 @@ from .knowledge import (CORE_EXAMS, EXAMS, ICE_HISTORY, OPEN_PROBES, MED_FOLLOWU
 from .llm import STOP_CODES, Doctor, with_retry
 from .prompts import (DX_RULES_V2, ANSWER_PROMPT, ANSWER_PROMPT_V2, CHALLENGER_PROMPT, CLOSING_PROMPT, CLOSING_PROMPT_V2, CLOSING_PROMPT_V3, CLOSING_PROMPT_V4T, CLOSING_PROMPT_V6, CLOSING_PROMPT_V7, CLOSING_PROMPT_V4, CLOSING_PROMPT_V5,
                       COVERAGE_RULE, DX_RULES, MED_RULES, PLAN_DEDUP_RULE, PLAN_PROMPT, PLAN_QRULE_V1, PLAN_QRULE_V2,
-                      PLAN_FEATURES_FIELD, PLAN_FEATURES_RULE, PLAN_STRUCT_FIELDS, PLAN_STRUCT_RULE, OPEN_START_RULE, PLAN_QRULE_V3, PLAN_QRULE_V4, QUESTION_RULES, REASSESS_PROMPT, REASSESS_PROMPT_V1, REPEAT_RULES, REPLAN_PROMPT, SHORTEN_PROMPT, THREAD_RULE)
+                      PLAN_FEATURES_FIELD, PLAN_FEATURES_RULE, PLAN_STRUCT_FIELDS, PLAN_STRUCT_RULE, OPEN_START_RULE, SUMMARY_PROMPT, PLAN_QRULE_V3, PLAN_QRULE_V4, QUESTION_RULES, REASSESS_PROMPT, REASSESS_PROMPT_V1, REPEAT_RULES, REPLAN_PROMPT, SHORTEN_PROMPT, THREAD_RULE)
 from .record import write_record
 from .visit import MAX_CHARS, Visit, nfc
 
@@ -251,7 +251,11 @@ class Consult:
                 if limit - self.visit.turn <= len(pending_exams) + len(pending_core):
                     self.queue.pop(0)
                     continue
-            if (config.HISTORY_V2 or config.EXAM_RESERVE) and pending_exams and limit - self.visit.turn <= len(pending_exams) and self.queue[0][0] != 'EXAM':
+            reserve = len(pending_exams) + (1 if config.SUMMARY_CONFIRM and not self.summarized else 0)  # 요약·확인 1턴도 예약
+            if (config.HISTORY_V2 or config.EXAM_RESERVE) and pending_exams and limit - self.visit.turn <= reserve and self.queue[0][0] != 'EXAM':
+                if config.SUMMARY_CONFIRM and not self.summarized:
+                    self.summarize_confirm()  # 진찰로 넘어가는 경계에서 1회(EXAM_RICH에서는 재계획이 이 지점에 못 오므로 여기서 직접)
+                    continue
                 kind, item = self.queue.pop(pending_exams[0])
             else:
                 kind, item = self.queue.pop(0)
@@ -285,6 +289,16 @@ class Consult:
                 ok = self.exam(item)
             if not ok:
                 return
+
+    def summarize_confirm(self):
+        """문진 → 진찰 경계에서 핵심 사실 1~2개를 환자에게 확인하는 한 문장(SUMMARY_CONFIRM, 1턴)."""
+        self.summarized = True
+        result = self.doctor.ask_json(SUMMARY_PROMPT, self.visit.situation(), max_tokens=1500,
+                                      check=lambda v: isinstance(v.get('line'), str)) or {}
+        line = nfc(result.get('line') or '')
+        if line and valid_question(line):
+            print(f'[agent] summary confirm: {line}', file=sys.stderr)
+            self.say(line, check_compound=False)
 
     def risky_medication(self):
         """첫 진술이나 직전 답에 의존성 위험 약이 언급됐는지."""
