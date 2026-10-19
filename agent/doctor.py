@@ -18,7 +18,7 @@ from .knowledge import (CORE_EXAMS, EXAMS, ICE_HISTORY, OPEN_PROBES, MED_FOLLOWU
 from .llm import STOP_CODES, Doctor, with_retry
 from .prompts import (DX_RULES_V2, ANSWER_PROMPT, ANSWER_PROMPT_V2, CHALLENGER_PROMPT, CLOSING_PROMPT, CLOSING_PROMPT_V2, CLOSING_PROMPT_V3, CLOSING_PROMPT_V4T, CLOSING_PROMPT_V6, CLOSING_PROMPT_V7, CLOSING_PROMPT_V4, CLOSING_PROMPT_V5,
                       COVERAGE_RULE, DX_RULES, MED_RULES, PLAN_DEDUP_RULE, PLAN_PROMPT, PLAN_QRULE_V1, PLAN_QRULE_V2,
-                      PLAN_FEATURES_FIELD, PLAN_FEATURES_RULE, PLAN_STRUCT_FIELDS, PLAN_STRUCT_RULE, PLAN_QRULE_V3, PLAN_QRULE_V4, QUESTION_RULES, REASSESS_PROMPT, REASSESS_PROMPT_V1, REPEAT_RULES, REPLAN_PROMPT, SHORTEN_PROMPT, THREAD_RULE)
+                      PLAN_FEATURES_FIELD, PLAN_FEATURES_RULE, PLAN_STRUCT_FIELDS, PLAN_STRUCT_RULE, OPEN_START_RULE, PLAN_QRULE_V3, PLAN_QRULE_V4, QUESTION_RULES, REASSESS_PROMPT, REASSESS_PROMPT_V1, REPEAT_RULES, REPLAN_PROMPT, SHORTEN_PROMPT, THREAD_RULE)
 from .record import write_record
 from .visit import MAX_CHARS, Visit, nfc
 
@@ -155,6 +155,8 @@ class Consult:
             prompt = prompt.replace(' "questions": ["환자에게 할 질문"],\n', ' ' + PLAN_STRUCT_FIELDS)
             prompt = prompt.replace('- exams: 아래 목록에서', PLAN_STRUCT_RULE + '\n- exams: 아래 목록에서')
             assert PLAN_STRUCT_FIELDS in prompt and PLAN_STRUCT_RULE in prompt
+        if config.OPEN_START:
+            prompt = prompt.replace('- exams: 아래 목록에서', OPEN_START_RULE + chr(10) + '- exams: 아래 목록에서')
         if config.PLAN_FEATURES:
             prompt = prompt.replace(' "questions": ["환자에게 할 질문"]', ' ' + PLAN_FEATURES_FIELD + '"questions": ["환자에게 할 질문"]')
             prompt = prompt.replace('- exams: 아래 목록에서', PLAN_FEATURES_RULE + '\n- exams: 아래 목록에서')
@@ -204,7 +206,9 @@ class Consult:
         prompt = REPLAN_PROMPT.format(med=MED_RULES, dx=DX_RULES, rules=QUESTION_RULES, done=done, menu=exam_menu(),
                                       known='"known": ["이미 확인된 사실"], ' if guard else '', repeat=REPEAT_RULES if guard else '',
                                       coverage=COVERAGE_RULE if cov else THREAD_RULE if config.THREAD else '',
-                                      coverage_fields=' "coverage": {{"covered": ["차원 번호"], "missing": ["차원 번호"]}}, "summary": "확인 요약 한 문장",' if cov else '')
+                                      coverage_fields=' "coverage": {{"covered": ["차원 번호"], "missing": ["차원 번호"]}}, "summary": "확인 요약 한 문장",' if cov
+                                      else ' "summary": "지금까지 들은 핵심 사실 1~2개를 환자에게 확인하는 한 문장(28자 이내, \\"~로 이해했는데 맞나요?\\"로 끝남; 이미 확인했으면 빈 문자열)",'
+                                      if (config.SUMMARY_CONFIRM and not self.summarized) else '')
         user = self.visit.situation() + f'\n\n현재 감별진단: {self.visit.ddx_text()}'
         if self.rejected:
             user += ('\n\n보내지 않은 질문(한 번에 여러 항목을 물어서 제외됨 — 필요하면 항목 하나씩 따로 쓰세요): '
@@ -215,7 +219,7 @@ class Consult:
             return False
         self.visit.ddx = update.get('ddx') or self.visit.ddx
         added = self.enqueue(update, front, max_exams=2 if config.EXAM_TRIM else None)
-        summary = nfc(update.get('summary') or '') if config.COVERAGE_PLAN else ''
+        summary = nfc(update.get('summary') or '') if (config.COVERAGE_PLAN or config.SUMMARY_CONFIRM) else ''
         if summary and valid_question(summary) and not self.summarized:  # 요약문은 질문이 아니라 복합 검사를 거치지 않음
             self.summarized = True
             self.queue.insert(0, ('SAY', summary))  # 진찰로 넘어가기 전 요약 확인(의사소통: 이해 확인)
@@ -271,7 +275,7 @@ class Consult:
                     else:
                         self.queue = [('SAY', q) for q, kws in pending] + self.queue
             elif kind == 'SAY':
-                ok = self.say(item, check_compound=not (config.COVERAGE_PLAN and item.endswith('맞나요?')))
+                ok = self.say(item, check_compound=not ((config.COVERAGE_PLAN or config.SUMMARY_CONFIRM) and item.endswith('맞나요?')))
             else:
                 ok = self.exam(item)
             if not ok:
