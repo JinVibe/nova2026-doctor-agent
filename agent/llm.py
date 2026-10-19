@@ -40,6 +40,10 @@ def with_retry(call, *args, waits=(2, 5, 10, 20, 30), **kwargs):
             if exc.code not in SAME_REQUEST_CODES:  # 빈 답 등은 새 요청으로
                 request_id = str(uuid.uuid4())
             time.sleep(wait)
+        except (TimeoutError, OSError) as exc:  # 응답 본문 읽는 중 끊김(SSL read timeout 등): SDK가 감싸지 않음 → 같은 request_id로 재시도
+            if wait is None:
+                raise NovaError('API_UNAVAILABLE') from exc
+            time.sleep(wait)
 
 
 def parse_json(text):

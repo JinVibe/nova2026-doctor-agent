@@ -16,7 +16,7 @@ from .guidelines import library
 from .knowledge import (CORE_EXAMS, EXAMS, ICE_HISTORY, OPEN_PROBES, MED_FOLLOWUPS, MED_FOLLOWUPS_V3, MED_NEGATIVE, MED_RISK_FOLLOWUPS, MED_RISK_WORDS,
                         exam_menu, history_items, is_child)
 from .llm import STOP_CODES, Doctor, with_retry
-from .prompts import (ANSWER_PROMPT, ANSWER_PROMPT_V2, CHALLENGER_PROMPT, CLOSING_PROMPT, CLOSING_PROMPT_V2, CLOSING_PROMPT_V3, CLOSING_PROMPT_V4T, CLOSING_PROMPT_V6, CLOSING_PROMPT_V7, CLOSING_PROMPT_V4, CLOSING_PROMPT_V5,
+from .prompts import (DX_RULES_V2, ANSWER_PROMPT, ANSWER_PROMPT_V2, CHALLENGER_PROMPT, CLOSING_PROMPT, CLOSING_PROMPT_V2, CLOSING_PROMPT_V3, CLOSING_PROMPT_V4T, CLOSING_PROMPT_V6, CLOSING_PROMPT_V7, CLOSING_PROMPT_V4, CLOSING_PROMPT_V5,
                       COVERAGE_RULE, DX_RULES, MED_RULES, PLAN_DEDUP_RULE, PLAN_PROMPT, PLAN_QRULE_V1, PLAN_QRULE_V2,
                       PLAN_FEATURES_FIELD, PLAN_FEATURES_RULE, PLAN_STRUCT_FIELDS, PLAN_STRUCT_RULE, PLAN_QRULE_V3, PLAN_QRULE_V4, QUESTION_RULES, REASSESS_PROMPT, REASSESS_PROMPT_V1, REPEAT_RULES, REPLAN_PROMPT, SHORTEN_PROMPT, THREAD_RULE)
 from .record import write_record
@@ -29,6 +29,7 @@ MAX_REPLANS = 4 if config.EARLY_REPLAN else 3
 TIME_MARGIN = 240   # 마감 4분 전부터 마무리·기록으로
 EMPATHY = '많이 불편하셨겠어요. '
 REFUSALS = {'EXAM_NOT_SPECIFIC', 'EXAM_NOT_RECOGNIZED', 'CONTENT_TOO_LONG', 'EMPTY_CONTENT'}
+DX_RULES = DX_RULES_V2 if config.DX_RULES_V2 else DX_RULES  # noqa: F811  (플래그로 진단 원칙 v2)
 MAX_EXAMS = (7 if config.EXAM_RICH else 4 if config.TURN_BUDGET and config.TURN_BUDGET <= 32 else 5 if config.TURN_BUDGET and config.TURN_BUDGET <= 34 else 6 if config.TURN_BUDGET and config.TURN_BUDGET <= 40 else 7) if config.EXAM_TRIM else 99   # 공통 3 + 계획 ≤4(짧은 진료는 ≤3)
 
 
@@ -147,7 +148,7 @@ class Consult:
                                     else PLAN_QRULE_V2 if config.HISTORY_V2 else PLAN_QRULE_V1,
                                     dedup=PLAN_DEDUP_RULE if config.REPEAT_GUARD else '')
         if config.EXAM_RICH:
-            prompt = prompt.replace('진찰 ID 5~10개', '진찰 ID 4~5개(감별진단마다 양성·음성을 가르는 표적 진찰: 피부·갑상선·눈·신경·정신상태·기립성 혈압·맥박·반사·떨림 등; 심음·외관은 따로 하므로 제외)')
+            prompt = prompt.replace('진찰 ID 5~10개', '진찰 ID 3~4개(감별진단마다 양성·음성을 가르는 표적 진찰: 피부·갑상선·눈·신경·정신상태·기립성 혈압·맥박·반사·떨림·복부 등; 외관·심음·폐는 따로 하므로 제외)')
         elif config.EXAM_TRIM:
             prompt = prompt.replace('진찰 ID 5~10개', '진찰 ID 3~4개(감별을 직접 가르는 것만)')
         if config.PLAN_STRUCT:
@@ -160,7 +161,8 @@ class Consult:
             assert PLAN_FEATURES_FIELD in prompt and PLAN_FEATURES_RULE in prompt
         plan = self.doctor.ask_json(prompt,
                                     self.visit.situation(), max_tokens=6000,
-                                    check=lambda v: isinstance(v.get('questions'), list)) or {}
+                                    check=lambda v: isinstance(v.get('questions'), list) or (
+                                        config.PLAN_STRUCT and any(isinstance(v.get(k), list) for k in ('hpi', 'red_flags', 'discriminators', 'ros')))) or {}
         self.visit.ddx = plan.get('ddx') or []
         if config.PLAN_STRUCT and not plan.get('questions'):
             # OSCE 순서: 현병력 → 위험 신호 → 감별 변별 → 계통 음성 확인. 칸별 상한으로 구성을 보장하고 합계 10.
@@ -190,10 +192,10 @@ class Consult:
         self.queue.append(('REPLAN', None))  # 병력 답(약 용량 등)을 보고 진찰 전에 한 번 보완
         core = CORE_EXAMS + (['MENTAL', 'ABD_PALP'] if config.CORE_EXAMS_FULL else ['ABD_PALP'] if config.CORE_ABD else [])
         if config.EXAM_RICH:
-            core = CORE_EXAMS[:2]  # 외관·심음만 공통(폐 청진은 호흡기 감별일 때 계획이 고름), 나머지 6개는 표적 진찰
+            core = list(CORE_EXAMS)  # 외관·심음·폐 공통(기침 증례에서 계획이 폐 청진을 빠뜨림, 10/19 로컬 S02) + 표적 4
         elif MAX_EXAMS <= 4:
             core = CORE_EXAMS[:1]  # 30턴: 외관만 공통, 나머지 3개는 감별을 가르는 계획 진찰(C10 안징후·C03 성장속도가 심음·폐에 밀렸음)
-        self.enqueue({'exams': core + list(plan.get('exams') or [])}, max_exams=(2 + 5) if config.EXAM_RICH else (3 + 4) if config.EXAM_TRIM else None)
+        self.enqueue({'exams': core + list(plan.get('exams') or [])}, max_exams=(3 + 4) if config.EXAM_RICH else (3 + 4) if config.EXAM_TRIM else None)
 
     def replan(self, front=False):
         done = ', '.join(sorted(self.visit.exams_done)) or '(없음)'

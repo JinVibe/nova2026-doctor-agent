@@ -5,6 +5,7 @@
 LLM은 ID만 고르고 실제 문장은 여기서 보낸다.
 """
 
+import re
 from . import config
 
 # (주제, 질문, 이미 다룬 것으로 볼 키워드) — 30자 이하, 질문 하나.
@@ -131,7 +132,13 @@ ICE_HISTORY = [
 
 
 def is_child(opening):
-    return any(w in opening for w in (CHILD_WORDS if config.HISTORY_V2 else CHILD_WORDS_V1))
+    for w in (CHILD_WORDS if config.HISTORY_V2 else CHILD_WORDS_V1):
+        if w == '아이':
+            if re.search(r'(?<![가-힣])아이', opening):  # "정수아이고"(이름+이고)의 '아이'는 소아가 아님(10/19 로컬 S04)
+                return True
+        elif w in opening:
+            return True
+    return False
 
 
 _TENS = {'열': 10, '스물': 20, '스무': 20, '서른': 30, '마흔': 40, '쉰': 50, '예순': 60, '일흔': 70, '여든': 80, '아흔': 90}
@@ -274,6 +281,7 @@ MED_NEGATIVE = ('없어요', '없습니다', '안 먹', '안 드', '아니요', 
 MED_RISK_WORDS = ('수면제', '졸피뎀', '스틸녹스', '수면유도제', '안정제', '신경안정', '벤조', '자낙스', '알프라졸람', '로라제팜', '디아제팜',
                   '클로나제팜', '진통제', '트라마돌', '마약성', '옥시코돈', '스테로이드', '프레드니솔론', '덱사메타손', '식욕억제제', '펜터민')
 MED_RISK_FOLLOWUPS = [
+    ('한 달에 며칠 드세요?', ('며칠', '한 달에')),
     ('처음보다 양이 늘었나요?', ('양이 늘', '복용량이 늘', '처음보다')),
     ('처방보다 더 드시는 날이 있나요?', ('처방보다', '더 드시', '더 먹')),
     ('약을 안 먹으면 어떤 증상이 생기나요?', ('안 먹으면', '거르면', '끊으면', '금단')),
