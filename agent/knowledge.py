@@ -167,7 +167,11 @@ def history_items(opening):
     if not config.HISTORY_V2:
         if config.CORE_FIX:
             return list(PEDS_HISTORY_V1_FIXED if is_child(opening) else CORE_HISTORY_V1_FIXED)
-        return list(PEDS_HISTORY_V1 if is_child(opening) else CORE_HISTORY_V1)
+        items = list(PEDS_HISTORY_V1 if is_child(opening) else CORE_HISTORY_V1)
+        if config.EXAM_RICH:  # 진찰이 늘어 꼬리가 잘릴 때 진단에 중요한 항목(부모의 성장·가족력)이 먼저 나가게
+            rank = {'pmh': 0, 'meds': 1, 'fh': 2, 'parents': 3}
+            items.sort(key=lambda it: rank.get(it[0], 10))
+        return items
     if is_child(opening):
         return list(PEDS_HISTORY)
     items = list(CORE_HISTORY)

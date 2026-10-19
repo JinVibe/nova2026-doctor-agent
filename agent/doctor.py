@@ -29,7 +29,7 @@ MAX_REPLANS = 4 if config.EARLY_REPLAN else 3
 TIME_MARGIN = 240   # 마감 4분 전부터 마무리·기록으로
 EMPATHY = '많이 불편하셨겠어요. '
 REFUSALS = {'EXAM_NOT_SPECIFIC', 'EXAM_NOT_RECOGNIZED', 'CONTENT_TOO_LONG', 'EMPTY_CONTENT'}
-MAX_EXAMS = (4 if config.TURN_BUDGET and config.TURN_BUDGET <= 32 else 5 if config.TURN_BUDGET and config.TURN_BUDGET <= 34 else 6 if config.TURN_BUDGET and config.TURN_BUDGET <= 40 else 7) if config.EXAM_TRIM else 99   # 공통 3 + 계획 ≤4(짧은 진료는 ≤3)
+MAX_EXAMS = (7 if config.EXAM_RICH else 4 if config.TURN_BUDGET and config.TURN_BUDGET <= 32 else 5 if config.TURN_BUDGET and config.TURN_BUDGET <= 34 else 6 if config.TURN_BUDGET and config.TURN_BUDGET <= 40 else 7) if config.EXAM_TRIM else 99   # 공통 3 + 계획 ≤4(짧은 진료는 ≤3)
 
 
 SYMPTOM_NAMES = ('저신장', '불면', '불면증', '체중 감소', '체중감소', '두통', '복통', '발열', '어지럼', '어지러움', '피로', '기침', '설사', '구토', '부종', '호흡곤란', '흉통')
@@ -143,7 +143,9 @@ class Consult:
                                     qrule=PLAN_QRULE_V4 if config.PLAN_Q_V4 else PLAN_QRULE_V3 if config.THREAD
                                     else PLAN_QRULE_V2 if config.HISTORY_V2 else PLAN_QRULE_V1,
                                     dedup=PLAN_DEDUP_RULE if config.REPEAT_GUARD else '')
-        if config.EXAM_TRIM:
+        if config.EXAM_RICH:
+            prompt = prompt.replace('진찰 ID 5~10개', '진찰 ID 4~5개(감별진단마다 양성·음성을 가르는 표적 진찰: 피부·갑상선·눈·신경·정신상태·기립성 혈압·맥박·반사·떨림 등; 심음·외관은 따로 하므로 제외)')
+        elif config.EXAM_TRIM:
             prompt = prompt.replace('진찰 ID 5~10개', '진찰 ID 3~4개(감별을 직접 가르는 것만)')
         if config.PLAN_FEATURES:
             prompt = prompt.replace(' "questions": ["환자에게 할 질문"]', ' ' + PLAN_FEATURES_FIELD + '"questions": ["환자에게 할 질문"]')
@@ -170,9 +172,11 @@ class Consult:
         self.queue += [('CORE', item) for item in history_items(self.visit.opening)]
         self.queue.append(('REPLAN', None))  # 병력 답(약 용량 등)을 보고 진찰 전에 한 번 보완
         core = CORE_EXAMS + (['MENTAL', 'ABD_PALP'] if config.CORE_EXAMS_FULL else ['ABD_PALP'] if config.CORE_ABD else [])
-        if MAX_EXAMS <= 4:
+        if config.EXAM_RICH:
+            core = CORE_EXAMS[:2]  # 외관·심음만 공통(폐 청진은 호흡기 감별일 때 계획이 고름), 나머지 6개는 표적 진찰
+        elif MAX_EXAMS <= 4:
             core = CORE_EXAMS[:1]  # 30턴: 외관만 공통, 나머지 3개는 감별을 가르는 계획 진찰(C10 안징후·C03 성장속도가 심음·폐에 밀렸음)
-        self.enqueue({'exams': core + list(plan.get('exams') or [])}, max_exams=(3 + 4) if config.EXAM_TRIM else None)
+        self.enqueue({'exams': core + list(plan.get('exams') or [])}, max_exams=(2 + 5) if config.EXAM_RICH else (3 + 4) if config.EXAM_TRIM else None)
 
     def replan(self, front=False):
         done = ', '.join(sorted(self.visit.exams_done)) or '(없음)'
