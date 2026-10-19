@@ -66,6 +66,7 @@ class Consult:
         self.references = ''  # 기록에 넣은 지침 발췌
         self.rejected = []    # 복합 질문이라 보내지 않은 질문(다음 재계획에 알려 하나씩 나눠 쓰게 함)
         self.summarized = False  # 진찰 전 요약 확인을 한 번만(COVERAGE_PLAN)
+        self.dx_votes = []       # DX_VOTE 재평가 결과들(로그용)
         self.worry_acked = False  # 걱정 반응 접두는 한 번만(TALK_V3)
         self.log_dir = os.getenv('NOVA_OUTPUT_DIR')  # 로컬 로그 위치(서버에선 미설정)
 
@@ -280,14 +281,41 @@ class Consult:
         self.gather(allow_replan=False)
         return review
 
+    def reassess_once(self, review):
+        top = next((d.get('dx') for d in self.visit.ddx if isinstance(d, dict) and d.get('dx')), '')
+        opinion = json.dumps({k: v for k, v in review.items() if k not in ('questions', 'exams')}, ensure_ascii=False)
+        return self.doctor.ask_json((REASSESS_PROMPT if config.DX_CANDIDATES else REASSESS_PROMPT_V1).format(dx=DX_RULES),
+                                    self.visit.situation() + f'\n\n진료 중 감별진단: {self.visit.ddx_text()}'
+                                    f'\n\n검토 의견(반대 의견): {opinion}',
+                                    max_tokens=6000, check=lambda v: v.get('diagnosis')) or {}
+
+    @staticmethod
+    def same_dx(a, b):
+        a, b = (re.sub(r'[\s·,()（）]', '', nfc(x)) for x in (a, b))
+        return bool(a) and bool(b) and (a in b or b in a)
+
+    def reassess_vote(self, review):
+        """재평가를 N회 돌려 주진단 다수결(DX_VOTE). 같은 진단을 포함 관계로 묶고, 동률이면 첫 결과를 따른다."""
+        results = [r for r in (self.reassess_once(review) for _ in range(max(1, config.DX_VOTE))) if r.get('diagnosis')]
+        if not results:
+            return {}
+        groups = []  # [(대표 결과, 표 수)]
+        for r in results:
+            for g in groups:
+                if self.same_dx(g[0]['diagnosis'], r['diagnosis']):
+                    g[1] += 1
+                    break
+            else:
+                groups.append([r, 1])
+        best = max(groups, key=lambda g: g[1])  # max는 첫 최대값을 고르므로 동률이면 먼저 나온 진단
+        self.dx_votes = [nfc(r['diagnosis']) for r in results]
+        print(f'[agent] dx vote {self.dx_votes} -> {best[0]["diagnosis"]!r} ({best[1]}/{len(results)})', file=sys.stderr)
+        return best[0]
+
     def reassess(self, review):
         """진료 전체를 다시 읽고 최종 감별진단·주진단을 정한다(후반에 나온 단서·반대 의견 반영)."""
         top = next((d.get('dx') for d in self.visit.ddx if isinstance(d, dict) and d.get('dx')), '')
-        opinion = json.dumps({k: v for k, v in review.items() if k not in ('questions', 'exams')}, ensure_ascii=False)
-        result = self.doctor.ask_json((REASSESS_PROMPT if config.DX_CANDIDATES else REASSESS_PROMPT_V1).format(dx=DX_RULES),
-                                      self.visit.situation() + f'\n\n진료 중 감별진단: {self.visit.ddx_text()}'
-                                      f'\n\n검토 의견(반대 의견): {opinion}',
-                                      max_tokens=6000, check=lambda v: v.get('diagnosis')) or {}
+        result = self.reassess_vote(review) if config.DX_VOTE else self.reassess_once(review)
         if isinstance(result.get('ddx'), list) and result['ddx']:
             self.visit.ddx = result['ddx']
         self.keywords = [k for k in result.get('keywords') or [] if isinstance(k, str)][:6]
@@ -428,7 +456,7 @@ class Consult:
         summary = {'turns': self.visit.turn, 'doctor_calls': self.doctor.calls, 'doctor_failures': self.doctor.failures,
                    'doctor_usage': self.doctor.usage,
                    'seconds': round(time.time() - self.started), 'ddx': self.visit.ddx, 'diagnosis': diagnosis,
-                   'keywords': self.keywords, 'reference_chars': len(self.references)}
+                   'keywords': self.keywords, 'reference_chars': len(self.references), 'dx_votes': self.dx_votes}
         print('[agent] ' + json.dumps(summary, ensure_ascii=False), file=sys.stderr)
         out = self.log_dir
         if out:
