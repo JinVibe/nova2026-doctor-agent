@@ -18,7 +18,7 @@ from .knowledge import (CORE_EXAMS, EXAMS, ICE_HISTORY, OPEN_PROBES, MED_FOLLOWU
 from .llm import STOP_CODES, Doctor, with_retry
 from .prompts import (DX_RULES_V2, ANSWER_PROMPT, ANSWER_PROMPT_V2, CHALLENGER_PROMPT, CLOSING_PROMPT, CLOSING_PROMPT_V2, CLOSING_PROMPT_V3, CLOSING_PROMPT_V4T, CLOSING_PROMPT_V6, CLOSING_PROMPT_V7, CLOSING_PROMPT_V4, CLOSING_PROMPT_V5,
                       COVERAGE_RULE, DX_RULES, MED_RULES, PLAN_DEDUP_RULE, PLAN_PROMPT, PLAN_QRULE_V1, PLAN_QRULE_V2,
-                      PLAN_FEATURES_FIELD, PLAN_FEATURES_RULE, PLAN_STRUCT_FIELDS, PLAN_STRUCT_RULE, OPEN_START_RULE, SUMMARY_PROMPT, PLAN_QRULE_V3, PLAN_QRULE_V4, QUESTION_RULES, REASSESS_PROMPT, REASSESS_PROMPT_V1, REPEAT_RULES, REPLAN_PROMPT, SHORTEN_PROMPT, THREAD_RULE)
+                      PLAN_FEATURES_FIELD, PLAN_FEATURES_RULE, PLAN_STRUCT_FIELDS, PLAN_STRUCT_RULE, OPEN_START_RULE, OPEN_START2_RULE, SUMMARY_PROMPT, PLAN_QRULE_V3, PLAN_QRULE_V4, QUESTION_RULES, REASSESS_PROMPT, REASSESS_PROMPT_V1, REPEAT_RULES, REPLAN_PROMPT, SHORTEN_PROMPT, THREAD_RULE)
 from .record import write_record
 from .visit import MAX_CHARS, Visit, nfc
 
@@ -156,7 +156,8 @@ class Consult:
             prompt = prompt.replace('- exams: 아래 목록에서', PLAN_STRUCT_RULE + '\n- exams: 아래 목록에서')
             assert PLAN_STRUCT_FIELDS in prompt and PLAN_STRUCT_RULE in prompt
         if config.OPEN_START:
-            prompt = prompt.replace('- exams: 아래 목록에서', OPEN_START_RULE + chr(10) + '- exams: 아래 목록에서')
+            rule = OPEN_START_RULE + (chr(10) + OPEN_START2_RULE if config.OPEN_START2 else '')
+            prompt = prompt.replace('- exams: 아래 목록에서', rule + chr(10) + '- exams: 아래 목록에서')
         if config.PLAN_FEATURES:
             prompt = prompt.replace(' "questions": ["환자에게 할 질문"]', ' ' + PLAN_FEATURES_FIELD + '"questions": ["환자에게 할 질문"]')
             prompt = prompt.replace('- exams: 아래 목록에서', PLAN_FEATURES_RULE + '\n- exams: 아래 목록에서')
