@@ -337,7 +337,14 @@ class Consult:
 
     def reassess_vote(self, review):
         """재평가를 N회 돌려 주진단 다수결(DX_VOTE). 같은 진단을 포함 관계로 묶고, 동률이면 첫 결과를 따른다."""
-        results = [r for r in (self.reassess_once(review) for _ in range(max(1, config.DX_VOTE))) if r.get('diagnosis')]
+        # 비용 파트가 호출 수에 민감(공식 ① 효율 −0.62) → 앞 두 결과가 같으면 세 번째는 생략(기대 호출 ≈ 2.1)
+        results = []
+        for i in range(max(1, config.DX_VOTE)):
+            r = self.reassess_once(review)
+            if r.get('diagnosis'):
+                results.append(r)
+            if i >= 1 and len(results) >= 2 and self.same_dx(results[0]['diagnosis'], results[1]['diagnosis']):
+                break
         if not results:
             return {}
         groups = []  # [(대표 결과, 표 수)]
