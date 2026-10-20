@@ -168,7 +168,7 @@ class Consult:
         self.visit.ddx = plan.get('ddx') or []
         if config.PLAN_STRUCT and not plan.get('questions'):
             # OSCE 순서: 현병력 → 위험 신호 → 감별 변별 → 계통 음성 확인. 칸별 상한으로 구성을 보장하고 합계 10.
-            caps = (('hpi', 4), ('red_flags', 2), ('discriminators', 2), ('ros', 3))
+            caps = tuple(zip(('hpi', 'red_flags', 'discriminators', 'ros'), config.PLAN_STRUCT_CAPS))
             qs = []
             for key, cap in caps:
                 qs += [q for q in (plan.get(key) or []) if isinstance(q, str)][:cap]
