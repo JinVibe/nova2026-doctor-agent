@@ -101,6 +101,14 @@ class Consult:
         except (NovaError, KeyError):
             pass
 
+    def first_prefix(self, text):
+        """첫 질문 앞 공감 접두. 30자 안에 들어가는 가장 긴 것(EMPATHY_FIT이면 짧은 대체 문구까지)."""
+        options = (EMPATHY, '힘드셨겠어요. ', '불편하셨죠. ') if config.EMPATHY_FIT else (EMPATHY,)
+        for pre in options:
+            if len(pre + text) <= MAX_CHARS:
+                return pre
+        return ''
+
     def say(self, text, check_compound=True):
         text = nfc(text)
         if not valid_question(text) or text in self.visit.asked:
@@ -108,8 +116,9 @@ class Consult:
         if check_compound and is_compound(text):
             self.rejected.append(text)
             return True
-        if not self.visit.asked and len(EMPATHY + text) <= MAX_CHARS:
-            text = EMPATHY + text
+        pre = self.first_prefix(text) if not self.visit.asked else ''
+        if pre:
+            text = pre + text
         elif text.endswith('?'):
             last = self.visit.events[-1] if self.visit.events else {}
             reply = last.get('reply') or ''
