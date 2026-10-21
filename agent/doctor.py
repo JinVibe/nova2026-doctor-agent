@@ -103,7 +103,7 @@ class Consult:
 
     def first_prefix(self, text):
         """첫 질문 앞 공감 접두. 30자 안에 들어가는 가장 긴 것(EMPATHY_FIT이면 짧은 대체 문구까지)."""
-        options = (EMPATHY, '힘드셨겠어요. ', '불편하셨죠. ') if config.EMPATHY_FIT else (EMPATHY,)
+        options = (EMPATHY, '힘드셨겠어요. ', '불편하셨죠. ', '힘드셨죠. ') if config.EMPATHY_FIT else (EMPATHY,)
         for pre in options:
             if len(pre + text) <= MAX_CHARS:
                 return pre
